@@ -33,7 +33,10 @@ Then:
           q  quit
        The "light cracks" switch (0/1) is for areas where the cracks look
        lighter than the paint, e.g. pale cracks on dark cloth.
-    Results go to  <image name>_cracks/  next to the image.
+    Results go to  <image name>_cracks/  next to the image. The main one is
+    *_enhanced.png: paint flattened to an even grey, cracks in black (use the
+    "contrast" and "texture cut" sliders for it). *_binary.png and
+    *_skeleton.png are the paper's thresholded and thinned versions.
 
 Requirements:  pip install opencv-python numpy scikit-image
 """
@@ -130,6 +133,32 @@ def thin(binary, min_len=0):
     return sk
 
 
+def enhance(bgr, crack_width, light=False, contrast=10, texture=16):
+    """Flat, high-contrast crack picture: paint -> even light grey, cracks -> black.
+
+    Each pixel is divided by the local paint level (the morphologically closed
+    image, i.e. the painting with its cracks filled in), so every paint colour
+    ends up the same grey and only the cracks stay dark.
+      contrast: higher = more of the crack pixels pushed all the way to black
+      texture : higher = faint brush / canvas texture suppressed more
+    """
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) + 1.0
+    if light:
+        g = 257.0 - g
+    g = cv2.GaussianBlur(g, (0, 0), 0.6)
+    d = 2 * int(crack_width) + 1
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
+    paint = cv2.morphologyEx(g, cv2.MORPH_CLOSE, se)
+    paint = cv2.GaussianBlur(paint, (0, 0), max(crack_width, 1))
+    depth = np.clip(1.0 - g / paint, 0, 1)                  # 0 on paint, >0 in a crack
+    ref = max(float(np.percentile(depth, 100 - 0.03 * max(contrast, 1))), 1e-3)
+    x = np.clip(depth / ref, 0, 1) ** (max(texture, 5) / 10.0)
+    return (ENH_BG * (1 - x)).astype(np.uint8)
+
+
+ENH_BG = 195   # grey level of the paint in the enhanced picture
+
+
 def extract(bgr, p):
     """Run the whole pipeline with parameter dict p. Returns dict of images."""
     gray = to_gray(bgr, p["flatten_bg"])
@@ -141,7 +170,9 @@ def extract(bgr, p):
     binary = offset_threshold(resp_n, max(p["tile"], 4), p["min_thresh"])
     binary = clean(binary, p["min_area"], p["bridge"])
     skel = thin(binary, p["min_len"])
-    return dict(gray=gray, closed=closed, response=resp_n, binary=binary, skeleton=skel)
+    enh = enhance(bgr, p["crack_width"], p["light"], p["contrast"], p["texture"])
+    return dict(gray=gray, closed=closed, response=resp_n, enhanced=enh,
+                binary=binary, skeleton=skel)
 
 
 # ----------------------------------------------------------------------------
@@ -179,6 +210,8 @@ def network_stats(skel):
 SLIDERS = [  # name, key, max, default
     ("light cracks", "light", 1, 0),          # 0 = dark cracks, 1 = light cracks
     ("crack width px", "crack_width", 25, 2),
+    ("contrast", "contrast", 50, 10),         # enhanced picture: how black the cracks go
+    ("texture cut", "texture", 40, 16),       # enhanced picture: remove faint texture
     ("tile px", "tile", 200, 40),
     ("min thresh", "min_thresh", 255, 60),
     ("min area px", "min_area", 500, 30),
@@ -221,16 +254,16 @@ def select_rois(img):
 
 
 def panel(crop, res):
-    """2x2 overview: original | crack response / binary | skeleton overlay."""
+    """2x2 overview: original | enhanced / binary | skeleton overlay."""
     def gray3(g):
         return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
     bin_img = gray3(np.where(res["binary"], 0, 255).astype(np.uint8))      # black cracks on white
     skel = cv2.dilate(res["skeleton"].astype(np.uint8), np.ones((2, 2), np.uint8)).astype(bool)
     overlay = crop.copy(); overlay[skel] = (0, 0, 255)
-    top = np.hstack([crop, gray3(res["response"])])
+    top = np.hstack([crop, gray3(res["enhanced"])])
     bot = np.hstack([bin_img, overlay])
     grid = np.vstack([top, bot])
-    for txt, (x, y) in [("original", (0, 0)), ("crack response", (1, 0)),
+    for txt, (x, y) in [("original", (0, 0)), ("enhanced", (1, 0)),
                         ("binary", (0, 1)), ("skeleton overlay", (1, 1))]:
         cv2.putText(grid, txt, (x * crop.shape[1] + 8, y * crop.shape[0] + 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
@@ -262,6 +295,7 @@ def save(out_dir, tag, crop, res, params, roi):
     os.makedirs(out_dir, exist_ok=True)
     b = os.path.join(out_dir, tag)
     cv2.imwrite(b + "_original.png", crop)
+    cv2.imwrite(b + "_enhanced.png", res["enhanced"])                            # main result
     cv2.imwrite(b + "_response.png", 255 - res["response"])                       # dark cracks
     cv2.imwrite(b + "_binary.png", np.where(res["binary"], 0, 255).astype(np.uint8))
     cv2.imwrite(b + "_skeleton.png", np.where(res["skeleton"], 0, 255).astype(np.uint8))
