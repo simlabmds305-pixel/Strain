@@ -241,6 +241,20 @@ def fit_to_screen(img, max_w=1400, max_h=850):
     return s, (cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA) if s < 1 else img)
 
 
+def check_gui():
+    """Stop with a clear fix if this OpenCV build cannot open windows."""
+    try:
+        cv2.namedWindow("_gui_check")
+        cv2.destroyWindow("_gui_check")
+    except cv2.error:
+        sys.exit(
+            "This OpenCV build has no window support (it is the 'headless' version),\n"
+            "so the area picker and sliders cannot open. Fix it with:\n\n"
+            "    python -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless opencv-python\n"
+            "    python -m pip install opencv-python\n\n"
+            "then run this script again.")
+
+
 def select_rois(img):
     s, disp = fit_to_screen(img)
     print("Draw a box, ENTER/SPACE to accept it. Draw more if you like. ESC when done.")
@@ -323,6 +337,7 @@ def main():
     out_dir = args.out or os.path.splitext(path)[0] + "_cracks"
     stem = os.path.splitext(os.path.basename(path))[0]
 
+    check_gui()
     rois = select_rois(img)
     if not rois:
         rois = [(0, 0, img.shape[1], img.shape[0])]
