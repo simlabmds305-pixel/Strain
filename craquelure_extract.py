@@ -305,20 +305,35 @@ def tune(crop, params):
             return "q", last, res
 
 
+def imwrite(path, img):
+    """cv2.imwrite that also works for non-ASCII paths on Windows, and says so if it fails."""
+    ok, buf = cv2.imencode(os.path.splitext(path)[1], img)
+    if not ok:
+        raise IOError(f"could not encode {path}")
+    buf.tofile(path)
+
+
+def imread(path):
+    """cv2.imread that also works for non-ASCII paths on Windows."""
+    data = np.fromfile(path, dtype=np.uint8)
+    return cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+
+
 def save(out_dir, tag, crop, res, params, roi):
     os.makedirs(out_dir, exist_ok=True)
     b = os.path.join(out_dir, tag)
-    cv2.imwrite(b + "_original.png", crop)
-    cv2.imwrite(b + "_enhanced.png", res["enhanced"])                            # main result
-    cv2.imwrite(b + "_response.png", 255 - res["response"])                       # dark cracks
-    cv2.imwrite(b + "_binary.png", np.where(res["binary"], 0, 255).astype(np.uint8))
-    cv2.imwrite(b + "_skeleton.png", np.where(res["skeleton"], 0, 255).astype(np.uint8))
+    imwrite(b + "_original.png", crop)
+    imwrite(b + "_enhanced.png", res["enhanced"])                            # main result
+    imwrite(b + "_response.png", 255 - res["response"])                       # dark cracks
+    imwrite(b + "_binary.png", np.where(res["binary"], 0, 255).astype(np.uint8))
+    imwrite(b + "_skeleton.png", np.where(res["skeleton"], 0, 255).astype(np.uint8))
     ov = crop.copy(); ov[res["skeleton"]] = (0, 0, 255)
-    cv2.imwrite(b + "_overlay.png", ov)
+    imwrite(b + "_overlay.png", ov)
     stats = network_stats(res["skeleton"])
     with open(b + "_info.json", "w") as f:
         json.dump(dict(roi_xywh=roi, params=params, stats=stats), f, indent=2)
-    print(f"  saved {b}_*.png   stats: {stats}")
+    print(f"  SAVED -> {b}_enhanced.png  (and _binary, _skeleton, ... in the same folder)")
+    print(f"  stats: {stats}")
 
 
 def main():
@@ -331,10 +346,11 @@ def main():
     path = args.image or pick_image()
     if not path:
         sys.exit("no image chosen")
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    img = imread(path)
     if img is None:
         sys.exit(f"could not read {path}")
-    out_dir = args.out or os.path.splitext(path)[0] + "_cracks"
+    out_dir = os.path.abspath(args.out or os.path.splitext(path)[0] + "_cracks")
+    print(f"results will be saved in: {out_dir}")
     stem = os.path.splitext(os.path.basename(path))[0]
 
     check_gui()
@@ -348,6 +364,7 @@ def main():
     for i, (x, y, w, h) in enumerate(rois, 1):
         crop = img[y:y + h, x:x + w]
         print(f"area {i}/{len(rois)}: x={x} y={y} w={w} h={h}")
+        print("  click on the tuning window, then press  s = save,  n = skip,  q = quit")
         action, used, res = tune(crop, params)
         if action == "q":
             break
