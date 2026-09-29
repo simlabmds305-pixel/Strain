@@ -31,6 +31,8 @@ Then:
           s  save this area and go to the next one
           n  skip this area
           q  quit
+       The "light cracks" switch (0/1) is for areas where the cracks look
+       lighter than the paint, e.g. pale cracks on dark cloth.
     Results go to  <image name>_cracks/  next to the image.
 
 Requirements:  pip install opencv-python numpy scikit-image
@@ -132,7 +134,10 @@ def extract(bgr, p):
     """Run the whole pipeline with parameter dict p. Returns dict of images."""
     gray = to_gray(bgr, p["flatten_bg"])
     resp, closed = crack_response(gray, p["crack_width"], p["light"], p["denoise"])
-    resp_n = cv2.normalize(resp, None, 0, 255, cv2.NORM_MINMAX)
+    # scale by the 99.5th percentile, not the max, so one dark stain or hole
+    # does not squash every real crack into the bottom few grey levels
+    hi = max(float(np.percentile(resp, 99.5)), 1.0)
+    resp_n = np.clip(resp.astype(np.float32) * (255.0 / hi), 0, 255).astype(np.uint8)
     binary = offset_threshold(resp_n, max(p["tile"], 4), p["min_thresh"])
     binary = clean(binary, p["min_area"], p["bridge"])
     skel = thin(binary, p["min_len"])
@@ -172,9 +177,10 @@ def network_stats(skel):
 # ----------------------------------------------------------------------------
 
 SLIDERS = [  # name, key, max, default
-    ("crack width px", "crack_width", 25, 3),
+    ("light cracks", "light", 1, 0),          # 0 = dark cracks, 1 = light cracks
+    ("crack width px", "crack_width", 25, 2),
     ("tile px", "tile", 200, 40),
-    ("min thresh", "min_thresh", 255, 30),
+    ("min thresh", "min_thresh", 255, 60),
     ("min area px", "min_area", 500, 30),
     ("min skel len", "min_len", 300, 10),
     ("bridge gaps px", "bridge", 5, 0),
@@ -231,7 +237,7 @@ def panel(crop, res):
     return grid
 
 
-def tune(crop, params, light):
+def tune(crop, params):
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     for name, key, mx, _ in SLIDERS:
         cv2.createTrackbar(name, WIN, int(params[key]), mx, lambda v: None)
@@ -239,7 +245,6 @@ def tune(crop, params, light):
     while True:
         cur = {key: cv2.getTrackbarPos(name, WIN) for name, key, _, _ in SLIDERS}
         cur["crack_width"] = max(cur["crack_width"], 1)
-        cur["light"] = light
         if cur != last:
             res = extract(crop, cur)
             _, disp = fit_to_screen(panel(crop, res))
@@ -271,7 +276,7 @@ def save(out_dir, tag, crop, res, params, roi):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image", nargs="?", help="painting image (omit for a file dialog)")
-    ap.add_argument("--light", action="store_true", help="cracks are LIGHTER than the paint")
+    ap.add_argument("--light", action="store_true", help="start with the light-cracks switch on")
     ap.add_argument("--out", help="output folder (default <image>_cracks)")
     args = ap.parse_args()
 
@@ -290,13 +295,14 @@ def main():
         print("no box drawn - using the whole image")
 
     params = {key: d for _, key, _, d in SLIDERS}
+    params["light"] = int(args.light)
     for i, (x, y, w, h) in enumerate(rois, 1):
         crop = img[y:y + h, x:x + w]
         print(f"area {i}/{len(rois)}: x={x} y={y} w={w} h={h}")
-        action, used, res = tune(crop, params, args.light)
+        action, used, res = tune(crop, params)
         if action == "q":
             break
-        params = {k: v for k, v in used.items() if k != "light"}   # carry settings to next area
+        params = used                                  # carry settings to next area
         if action == "s":
             save(out_dir, f"{stem}_roi{i}", crop, res, used, [x, y, w, h])
     cv2.destroyAllWindows()
