@@ -35,7 +35,7 @@ Then:
           n  skip this area
           q  quit
           v  change the picture view: original | enhanced  ->  enhanced only
-             ->  all four (adds the paper's binary and skeleton)
+             ->  all four (original, enhanced, binary, skeleton)
     Sliders, in order of use:
        light cracks    0 = dark cracks, 1 = cracks paler than the paint
        crack width     slightly wider than the thickest crack (pixels)
@@ -335,10 +335,8 @@ def panel(crop, res, view, max_w, max_h):
         tiles = [[("enhanced", enh)]]
     elif view == 2:
         bin_img = gray3(np.where(res["binary"], 0, 255).astype(np.uint8))
-        skel = cv2.dilate(res["skeleton"].astype(np.uint8), np.ones((2, 2), np.uint8)).astype(bool)
-        overlay = crop.copy(); overlay[skel] = (0, 0, 255)
         tiles = [[("original", crop), ("enhanced", enh)],
-                 [("binary", bin_img), ("skeleton overlay", overlay)]]
+                 [("binary", bin_img), ("skeleton", None)]]
     else:
         tiles = [[("original", crop), ("enhanced", enh)]]
     rows, cols = len(tiles), len(tiles[0])
@@ -348,6 +346,11 @@ def panel(crop, res, view, max_w, max_h):
                          (max_h - gap * (rows - 1)) / rows, upscale=6.0)
     tw, th = max(int(w * s), 1), max(int(h * s), 1)
     interp = cv2.INTER_AREA if s < 1 else cv2.INTER_NEAREST
+    if view == 2:
+        # 1-px lines vanish when shrunk: thicken them just enough for the screen
+        k = max(int(np.ceil(1 / s)), 1) if s < 1 else 1
+        sk = cv2.dilate(res["skeleton"].astype(np.uint8), np.ones((k, k), np.uint8))
+        tiles[1][1] = ("skeleton", gray3(np.where(sk > 0, 0, 255).astype(np.uint8)))
     canvas = np.full((rows * th + gap * (rows - 1), cols * tw + gap * (cols - 1), 3), 60, np.uint8)
     for r, row in enumerate(tiles):
         for c, (label, img) in enumerate(row):
