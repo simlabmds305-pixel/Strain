@@ -39,6 +39,11 @@ Automatic area finder (--auto, --batch)
     Dark and light cracks are both tried. The best non-overlapping squares are
     kept, their crack width is estimated, and a map (*_areas.jpg: red = good)
     is saved with the areas numbered.
+    File names say which way they were made, so the runs never overwrite each other:
+       <name>_checked1_...   --auto, areas you checked and saved with s
+       <name>_auto1_...      --batch on one image
+       <name>_F_auto1_...    --batch on a whole folder
+       <name>_roi1_...       boxes you drew yourself
 
 Then:
     1. Drag a rectangle over the area you want, press ENTER/SPACE
@@ -729,8 +734,9 @@ def show_area_map(amap):
             return False
 
 
-def run_batch(path, args):
-    """No windows: find the best areas and save everything for them."""
+def run_batch(path, args, kind="auto"):
+    """No windows: find the best areas and save everything for them.
+    kind names the files: "auto" (one image) or "F_auto" (a folder run)."""
     img = imread(path)
     if img is None:
         print(f"could not read {path} - skipped")
@@ -743,7 +749,7 @@ def run_batch(path, args):
     imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
     for i, ((x, y, w, h), p) in enumerate(found, 1):
         crop = img[y:y + h, x:x + w]
-        save(out_dir, f"{stem}_auto{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
+        save(out_dir, f"{stem}_{kind}{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
 
 
 def main():
@@ -779,8 +785,9 @@ def main():
                 args.out = None
         else:
             files = [path]
+        kind = "F_auto" if os.path.isdir(path) else "auto"
         for f in files:
-            run_batch(f, args)
+            run_batch(f, args, kind)
         return
 
     img = imread(path)
@@ -799,7 +806,7 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
         imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
         if found and show_area_map(amap):
-            jobs = [(roi, p, f"{stem}_auto{i}") for i, (roi, p) in enumerate(found, 1)]
+            jobs = [(roi, p, f"{stem}_checked{i}") for i, (roi, p) in enumerate(found, 1)]
         elif not found:
             print("no suitable area found - draw your own")
     if not jobs:
