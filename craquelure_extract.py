@@ -24,6 +24,21 @@ Usage
     python craquelure_extract.py painting.jpg    # or give the path
     python craquelure_extract.py painting.jpg --light   # cracks brighter than paint
     python craquelure_extract.py painting.jpg --paper   # paper's binary method
+    python craquelure_extract.py painting.jpg --auto    # finds the best areas for you
+    python craquelure_extract.py painting.jpg --batch   # finds them and saves, no windows
+    python craquelure_extract.py C:\\cracks --batch     # ... for every image in a folder
+       options for --auto/--batch:  --areas 3   --size 800   --polarity auto|dark|light
+
+Automatic area finder (--auto, --batch)
+    The painting is cut into overlapping squares, and each is scored on:
+       crack network   how much long, connected crack line it contains
+       cleanliness     share of detected cracks that are long lines, not specks
+       contrast        how far the cracks stand out from the paint's own noise
+       flatness        little colour spread (no objects, outlines or folds)
+       exposure        no blown-out highlights or crushed shadows
+    Dark and light cracks are both tried. The best non-overlapping squares are
+    kept, their crack width is estimated, and a map (*_areas.jpg: red = good)
+    is saved with the areas numbered.
 
 Then:
     1. Drag a rectangle over the area you want, press ENTER/SPACE
@@ -268,6 +283,207 @@ def network_stats(skel):
 
 
 # ----------------------------------------------------------------------------
+# automatic area finder
+# ----------------------------------------------------------------------------
+
+AUTO_MAX_SIDE = 2500   # the painting is scored at this size (px, longest side)
+AUTO_LONG = 25         # crack pieces at least this long (scored px) count as "network"
+AUTO_NET_FULL = 0.004  # long-crack density that earns full marks (0.4 % of pixels)
+AUTO_COLOUR = 6.0      # colour spread (Lab units) at which flatness drops to 37 %
+AUTO_MIN_REL = 0.3     # areas scoring below 30 % of the best one are not offered
+
+
+def _box_mean(integral, x, y, w, h):
+    """Mean of a map over a box, from its integral image (cv2.integral)."""
+    s = integral[y + h, x + w] - integral[y, x + w] - integral[y + h, x] + integral[y, x]
+    return s / float(w * h)
+
+
+def crack_depth(bgr, crack_width, light):
+    """How much darker (grey levels) each pixel is than the paint around it."""
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) + 1.0
+    if light:
+        g = 257.0 - g
+    g = cv2.GaussianBlur(g, (0, 0), 0.6)
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * crack_width + 1,) * 2)
+    paint = cv2.GaussianBlur(cv2.morphologyEx(g, cv2.MORPH_CLOSE, se), (0, 0), crack_width)
+    return np.clip(paint - g, 0, None)
+
+
+def score_maps(bgr, light):
+    """Per-pixel maps the area score is built from (for one crack polarity).
+
+    Returns maps whose window means give: skeleton density, long-network
+    density, crack contrast (depth on the skeleton) and background noise
+    (mean and mean-square of depth away from cracks)."""
+    p = {key: d for _, key, _, d in SLIDERS}
+    p["light"] = int(light)
+    res = extract(bgr, p)
+    sk = res["skeleton"].astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(sk, connectivity=8)
+    long_ok = np.zeros(n, dtype=bool)
+    long_ok[1:] = stats[1:, cv2.CC_STAT_AREA] >= AUTO_LONG
+    long_net = long_ok[lab].astype(np.float32)             # skeleton in long, connected cracks
+    D = crack_depth(bgr, p["crack_width"], light)
+    bg = (cv2.dilate(res["binary"].astype(np.uint8), np.ones((5, 5), np.uint8)) == 0).astype(np.float32)
+    skf = sk.astype(np.float32)
+    return [skf, long_net, D * skf, bg, D * bg, D * D * bg]
+
+
+def blockwise_maps(bgr, light, block, pad=16):
+    """score_maps computed block by block, so each block's contrast is scaled on
+    its own - the same as when that part is processed as a hand-picked box.
+    (Scaling over the whole painting lets busy dark areas hide faint cracks.)"""
+    h, w = bgr.shape[:2]
+    out = None
+    for y0 in range(0, h, block):
+        for x0 in range(0, w, block):
+            y1, x1 = min(y0 + block, h), min(x0 + block, w)
+            ya, xa = max(y0 - pad, 0), max(x0 - pad, 0)
+            yb, xb = min(y1 + pad, h), min(x1 + pad, w)
+            ms = score_maps(bgr[ya:yb, xa:xb], light)
+            if out is None:
+                out = [np.zeros((h, w), np.float32) for _ in ms]
+            for o, m in zip(out, ms):
+                o[y0:y1, x0:x1] = m[y0 - ya:y1 - ya, x0 - xa:x1 - xa]
+    return out
+
+
+def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
+    """Find the areas of a painting that are best for crack analysis.
+
+    Each square window (overlapping, stride = size/4) is scored on
+      crack network : how much long, connected crack line it contains (capped)
+      cleanliness   : share of detected crack pixels that are long lines, not specks
+      contrast      : how far the cracks stand out from the paint's own noise
+      flatness      : little colour spread, i.e. no objects, outlines or folds
+      exposure      : no blown highlights or crushed shadows
+    Both dark and light cracks are tried (polarity="auto"), or only one.
+    Returns (areas, heat) where areas = [(x, y, w, h, score, light), ...] in
+    full-image pixels, best first and not overlapping, and heat is a 0..1 map.
+    """
+    H, W = bgr.shape[:2]
+    size = int(size or max(min(H, W) // 5, min(300, min(H, W) // 2)))   # >= 300 px if it fits
+    size = max(64, min(size, H, W))
+    sc = min(1.0, AUTO_MAX_SIDE / max(H, W))
+    small = cv2.resize(bgr, (max(int(W * sc), 1), max(int(H * sc), 1)),
+                       interpolation=cv2.INTER_AREA) if sc < 1 else bgr
+    h, w = small.shape[:2]
+    ws = max(int(size * sc), 32)
+    step = max(ws // 4, 4)
+
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    # flatness: colour spread of the painting with cracks closed and detail blurred
+    # away. Plain paint has almost none; any object, outline or fold adds a lot.
+    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    I_col = []
+    for i in range(3):
+        ch = cv2.GaussianBlur(cv2.morphologyEx(lab[..., i], cv2.MORPH_CLOSE, se), (0, 0), 3)
+        I_col += [cv2.integral(ch), cv2.integral(ch * ch)]
+    clip = ((gray >= 250) | (gray <= 5)).astype(np.float32)
+    I_clip = cv2.integral(clip)
+
+    pols = {"auto": (0, 1), "dark": (0,), "light": (1,)}[polarity]
+    maps = {pol: [cv2.integral(m) for m in blockwise_maps(small, pol, max(ws // 2, 32))]
+            for pol in pols}
+
+    ys = list(range(0, h - ws + 1, step)) or [0]
+    xs = list(range(0, w - ws + 1, step)) or [0]
+    wins = []
+    for y in ys:
+        for x in xs:
+            var = 0.0
+            for I1, I2 in zip(I_col[0::2], I_col[1::2]):
+                m = _box_mean(I1, x, y, ws, ws)
+                var += max(_box_mean(I2, x, y, ws, ws) - m * m, 0.0)
+            g = np.sqrt(var)                                            # colour spread
+            c = _box_mean(I_clip, x, y, ws, ws)
+            for pol in pols:
+                sk, net, dsk, bg, dbg, d2bg = (_box_mean(I, x, y, ws, ws) for I in maps[pol])
+                clean_frac = net / sk if sk > 0 else 0.0
+                contrast = dsk / sk if sk > 0 else 0.0
+                if bg > 0:
+                    mu = dbg / bg
+                    noise = np.sqrt(max(d2bg / bg - mu * mu, 0.0))
+                else:
+                    noise = np.inf
+                snr = contrast / (noise + 1e-6)
+                wins.append([x, y, net, clean_frac, g, c, snr, pol])
+    if not wins:
+        return [], np.zeros((H, W), np.float32)
+
+    arr = np.array([wv[2:7] for wv in wins], dtype=np.float64)
+    net, clean_frac, grad_, clip_, snr = arr.T
+    score = (np.clip(net / AUTO_NET_FULL, 0, 1)               # enough crack network (capped:
+             * clean_frac                                     #  floods of noise earn no more)
+             * np.clip((snr - 2.0) / 4.0, 0, 1) ** 2          # cracks stand out from paint noise
+             * np.exp(-(grad_ / AUTO_COLOUR) ** 2)            # flat: no objects or folds
+             * np.clip(1 - 5 * clip_, 0, 1))                  # not over/under-exposed
+    if score.max() > 0:
+        score = score / score.max()
+    find_areas.debug = (wins, arr, score, sc, ws)             # for tuning / inspection
+
+    heat = np.zeros((h, w), np.float32)
+    for (x, y, *_), s_ in zip(wins, score):
+        heat[y:y + ws, x:x + ws] = np.maximum(heat[y:y + ws, x:x + ws], s_)
+    heat = cv2.resize(heat, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    areas, taken = [], []
+    for i in np.argsort(-score):
+        if score[i] < AUTO_MIN_REL or len(areas) >= n_areas:
+            break                                                 # rest are too poor to offer
+        x, y = wins[i][0], wins[i][1]
+        if any(abs(x - tx) < ws and abs(y - ty) < ws for tx, ty in taken):
+            continue                                              # overlaps a better area
+        taken.append((x, y))
+        fx, fy = int(round(x / sc)), int(round(y / sc))
+        areas.append((fx, fy, min(size, W - fx), min(size, H - fy), float(score[i]), wins[i][7]))
+    return areas, heat
+
+
+def estimate_crack_width(bgr, light):
+    """Typical crack width (px) in an area, from the binary's distance transform."""
+    p = {key: d for _, key, _, d in SLIDERS}
+    p["light"] = int(light)
+    res = extract(bgr, p)
+    sk = res["skeleton"]
+    if sk.sum() < 20:
+        return p["crack_width"]
+    dist = cv2.distanceTransform(res["binary"].astype(np.uint8), cv2.DIST_L2, 3)
+    width = 2 * float(np.median(dist[sk]))                     # full width across the crack
+    return int(np.clip(round(width) + 1, 1, 15))                # closing disk a bit wider
+
+
+def area_map(bgr, areas, heat):
+    """Overview picture: painting, heat tint (red = good) and numbered boxes.
+    Drawn at most AUTO_MAX_SIDE px on its longest side, so huge scans stay light."""
+    sc = min(1.0, AUTO_MAX_SIDE / max(bgr.shape[:2]))
+    if sc < 1:
+        size = (int(bgr.shape[1] * sc), int(bgr.shape[0] * sc))
+        bgr = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
+        heat = cv2.resize(heat, size, interpolation=cv2.INTER_LINEAR)
+        areas = [(int(x * sc), int(y * sc), int(w * sc), int(h * sc), s_, lt)
+                 for x, y, w, h, s_, lt in areas]
+    over = bgr.copy()
+    tint = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    over = cv2.addWeighted(over, 0.65, tint, 0.35, 0)
+    t = max(2, int(max(bgr.shape[:2]) / 400))
+    for i, (x, y, w, h, s_, light) in enumerate(areas, 1):
+        cv2.rectangle(over, (x, y), (x + w, y + h), (255, 255, 255), t * 2)
+        cv2.rectangle(over, (x, y), (x + w, y + h), (0, 0, 0), t)
+        label = f"#{i} {s_:.2f} {'light' if light else 'dark'}"
+        fs = t * 0.6
+        tw = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, t)[0][0]
+        if tw > w - 6 * t:                                   # keep the label inside the box
+            fs *= (w - 6 * t) / tw
+        org = (x + t * 3, y + int(t * 3 + 22 * fs))
+        cv2.putText(over, label, org, cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), t * 3, cv2.LINE_AA)
+        cv2.putText(over, label, org, cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), t, cv2.LINE_AA)
+    return over
+
+
+# ----------------------------------------------------------------------------
 # interactive UI
 # ----------------------------------------------------------------------------
 
@@ -477,18 +693,96 @@ def save(out_dir, tag, crop, res, params, roi):
     print(f"  stats: {stats}")
 
 
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
+
+
+def auto_areas(img, args):
+    """Find the best areas and the settings for each: [(roi, params), ...]."""
+    print("finding the best areas for crack analysis ...")
+    areas, heat = find_areas(img, args.size, args.areas, args.polarity)
+    out = []
+    for i, (x, y, w, h, score, light) in enumerate(areas, 1):
+        crop = img[y:y + h, x:x + w]
+        p = {key: d for _, key, _, d in SLIDERS}
+        p["light"] = int(light)
+        p["crack_width"] = estimate_crack_width(crop, light)
+        print(f"  area {i}: x={x} y={y} size={w}x{h}  score={score:.2f}  "
+              f"{'light' if light else 'dark'} cracks  crack width~{p['crack_width']} px")
+        out.append(((x, y, w, h), p))
+    return out, area_map(img, areas, heat)
+
+
+def show_area_map(amap):
+    """Show the area map; ENTER/SPACE = use these areas, ESC = draw my own."""
+    win = "best areas   (ENTER = analyse these,  ESC = draw my own)"
+    sw, sh = screen_size()
+    _, disp = fit_to_screen(amap, sw - 80, sh - 140)
+    cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+    cv2.imshow(win, disp)
+    while True:
+        k = cv2.waitKey(50) & 0xFF
+        if k in (13, 10, 32):
+            cv2.destroyWindow(win)
+            return True
+        if k in (27, ord("q")) or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
+            cv2.destroyWindow(win)
+            return False
+
+
+def run_batch(path, args):
+    """No windows: find the best areas and save everything for them."""
+    img = imread(path)
+    if img is None:
+        print(f"could not read {path} - skipped")
+        return
+    out_dir = os.path.abspath(args.out or os.path.splitext(path)[0] + "_cracks")
+    stem = os.path.splitext(os.path.basename(path))[0]
+    print(f"\n{path}\nresults will be saved in: {out_dir}")
+    found, amap = auto_areas(img, args)
+    os.makedirs(out_dir, exist_ok=True)
+    imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
+    for i, ((x, y, w, h), p) in enumerate(found, 1):
+        crop = img[y:y + h, x:x + w]
+        save(out_dir, f"{stem}_auto{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("image", nargs="?", help="painting image (omit for a file dialog)")
+    ap.add_argument("image", nargs="?", help="painting image (omit for a file dialog); "
+                                             "with --batch it may also be a folder")
     ap.add_argument("--light", action="store_true", help="start with the light-cracks switch on")
     ap.add_argument("--paper", action="store_true",
                     help="make the binary with the paper's offset (shifted-tile Otsu) threshold")
+    ap.add_argument("--auto", action="store_true",
+                    help="find the best areas automatically, then tune them in the windows")
+    ap.add_argument("--batch", action="store_true",
+                    help="find the best areas and save the results without any windows")
+    ap.add_argument("--areas", type=int, default=3, help="how many areas to find (default 3)")
+    ap.add_argument("--size", type=int, help="area size in pixels (default: 1/5 of the "
+                                             "painting's shorter side, at least 300)")
+    ap.add_argument("--polarity", choices=["auto", "dark", "light"], default="auto",
+                    help="crack colour to look for with --auto/--batch (default: try both)")
     ap.add_argument("--out", help="output folder (default <image>_cracks)")
     args = ap.parse_args()
 
     path = args.image or pick_image()
     if not path:
         sys.exit("no image chosen")
+
+    if args.batch:
+        if os.path.isdir(path):
+            files = sorted(os.path.join(path, f) for f in os.listdir(path)
+                           if f.lower().endswith(IMG_EXTS))
+            print(f"{len(files)} images in {path}")
+            if args.out:
+                print("note: --out is ignored for a folder; each image gets its own _cracks folder")
+                args.out = None
+        else:
+            files = [path]
+        for f in files:
+            run_batch(f, args)
+        return
+
     img = imread(path)
     if img is None:
         sys.exit(f"could not read {path}")
@@ -497,24 +791,36 @@ def main():
     stem = os.path.splitext(os.path.basename(path))[0]
 
     check_gui()
-    rois = select_rois(img)
-    if not rois:
-        rois = [(0, 0, img.shape[1], img.shape[0])]
-        print("no box drawn - using the whole image")
+    base = {key: d for _, key, _, d in SLIDERS}
+    base["light"] = int(args.light)
+    jobs = []                                          # [(roi, params or None, tag)]
+    if args.auto:
+        found, amap = auto_areas(img, args)
+        os.makedirs(out_dir, exist_ok=True)
+        imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
+        if found and show_area_map(amap):
+            jobs = [(roi, p, f"{stem}_auto{i}") for i, (roi, p) in enumerate(found, 1)]
+        elif not found:
+            print("no suitable area found - draw your own")
+    if not jobs:
+        rois = select_rois(img)
+        if not rois:
+            rois = [(0, 0, img.shape[1], img.shape[0])]
+            print("no box drawn - using the whole image")
+        jobs = [(roi, None, f"{stem}_roi{i}") for i, roi in enumerate(rois, 1)]
 
-    params = {key: d for _, key, _, d in SLIDERS}
-    params["light"] = int(args.light)
-    view = 0
-    for i, (x, y, w, h) in enumerate(rois, 1):
+    params, view = base, 0
+    for i, ((x, y, w, h), p_auto, tag) in enumerate(jobs, 1):
         crop = img[y:y + h, x:x + w]
-        print(f"area {i}/{len(rois)}: x={x} y={y} w={w} h={h}")
+        print(f"area {i}/{len(jobs)}: x={x} y={y} w={w} h={h}")
         print("  click on either window, then press  s = save,  n = skip,  q = quit,  v = view")
-        action, used, res, view = tune(crop, params, view, args.paper)
+        start = dict(p_auto) if p_auto else params     # auto areas start from their own settings
+        action, used, res, view = tune(crop, start, view, args.paper)
         if action == "q":
             break
-        params = used                                  # carry settings to next area
+        params = used                                  # carry settings to next hand-drawn area
         if action == "s":
-            save(out_dir, f"{stem}_roi{i}", crop, res, used, [x, y, w, h])
+            save(out_dir, tag, crop, res, used, [x, y, w, h])
     cv2.destroyAllWindows()
 
 
