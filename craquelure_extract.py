@@ -37,8 +37,10 @@ Automatic area finder (--auto, --batch)
        flatness        little colour spread (no objects, outlines or folds)
        exposure        no blown-out highlights or crushed shadows
     Dark and light cracks are both tried. The best non-overlapping squares are
-    kept, their crack width is estimated, and a map (*_areas.jpg: red = good)
-    is saved with the areas numbered.
+    kept, their crack width is estimated, and two maps are saved:
+       *_areas.jpg     where the good areas are (red = good), areas numbered
+       *_crackmap.jpg  every crack found in the painting (red), areas outlined -
+                       check here that the chosen areas really sit on cracks
     File names say which way they were made, so the runs never overwrite each other:
        <name>_checked1_...   --auto, areas you checked and saved with s
        <name>_auto1_...      --batch on one image
@@ -293,9 +295,11 @@ def network_stats(skel):
 
 AUTO_MAX_SIDE = 2500   # the painting is scored at this size (px, longest side)
 AUTO_LONG = 25         # crack pieces at least this long (scored px) count as "network"
-AUTO_NET_FULL = 0.004  # long-crack density that earns full marks (0.4 % of pixels)
 AUTO_COLOUR = 6.0      # colour spread (Lab units) at which flatness drops to 37 %
 AUTO_MIN_REL = 0.3     # areas scoring below 30 % of the best one are not offered
+AUTO_FLAT_MIN = 0.0    # score multiplier for a busy area (a plain one gets 1.0)
+AUTO_DENSE = 0.04      # crack-line density above which "cracks" start to look like noise
+AUTO_LIGHT_MAX = 120   # light cracks are only looked for where the paint is darker than this
 
 
 def _box_mean(integral, x, y, w, h):
@@ -315,7 +319,7 @@ def crack_depth(bgr, crack_width, light):
     return np.clip(paint - g, 0, None)
 
 
-def score_maps(bgr, light):
+def score_maps(bgr, light, crack_width):
     """Per-pixel maps the area score is built from (for one crack polarity).
 
     Returns maps whose window means give: skeleton density, long-network
@@ -323,49 +327,78 @@ def score_maps(bgr, light):
     (mean and mean-square of depth away from cracks)."""
     p = {key: d for _, key, _, d in SLIDERS}
     p["light"] = int(light)
+    p["crack_width"] = int(crack_width)
     res = extract(bgr, p)
     sk = res["skeleton"].astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(sk, connectivity=8)
     long_ok = np.zeros(n, dtype=bool)
-    long_ok[1:] = stats[1:, cv2.CC_STAT_AREA] >= AUTO_LONG
+    long_ok[1:] = stats[1:, cv2.CC_STAT_AREA] >= AUTO_LONG * max(crack_width / 2.0, 1.0)
     long_net = long_ok[lab].astype(np.float32)             # skeleton in long, connected cracks
     D = crack_depth(bgr, p["crack_width"], light)
-    bg = (cv2.dilate(res["binary"].astype(np.uint8), np.ones((5, 5), np.uint8)) == 0).astype(np.float32)
+    bg = (cv2.dilate(res["binary"].astype(np.uint8),
+                     np.ones((2 * crack_width + 1,) * 2, np.uint8)) == 0).astype(np.float32)
     skf = sk.astype(np.float32)
     return [skf, long_net, D * skf, bg, D * bg, D * D * bg]
 
 
-def blockwise_maps(bgr, light, block, pad=16):
-    """score_maps computed block by block, so each block's contrast is scaled on
-    its own - the same as when that part is processed as a hand-picked box.
-    (Scaling over the whole painting lets busy dark areas hide faint cracks.)"""
-    h, w = bgr.shape[:2]
-    out = None
-    for y0 in range(0, h, block):
-        for x0 in range(0, w, block):
-            y1, x1 = min(y0 + block, h), min(x0 + block, w)
+def blockwise_maps(bgr, light, block, crack_width, small_hw, pad=None):
+    """score_maps at FULL resolution, block by block, each block's maps then
+    averaged down to the small scoring grid (small_hw).
+
+    Full resolution: the finder sees the same cracks as the tuning window.
+    Block by block: each block's contrast is scaled on its own, like a
+    hand-picked box (scaling over the whole painting lets busy dark areas
+    hide faint cracks)."""
+    H, W = bgr.shape[:2]
+    h, w = small_hw
+    sy, sx = h / H, w / W
+    pad = pad or 4 * crack_width + 8
+    out = [np.zeros((h, w), np.float32) for _ in range(6)]
+    for y0 in range(0, H, block):
+        for x0 in range(0, W, block):
+            y1, x1 = min(y0 + block, H), min(x0 + block, W)
             ya, xa = max(y0 - pad, 0), max(x0 - pad, 0)
-            yb, xb = min(y1 + pad, h), min(x1 + pad, w)
-            ms = score_maps(bgr[ya:yb, xa:xb], light)
-            if out is None:
-                out = [np.zeros((h, w), np.float32) for _ in ms]
+            yb, xb = min(y1 + pad, H), min(x1 + pad, W)
+            ms = score_maps(bgr[ya:yb, xa:xb], light, crack_width)
+            ty0, ty1 = int(round(y0 * sy)), int(round(y1 * sy))
+            tx0, tx1 = int(round(x0 * sx)), int(round(x1 * sx))
+            if ty1 <= ty0 or tx1 <= tx0:
+                continue
             for o, m in zip(out, ms):
-                o[y0:y1, x0:x1] = m[y0 - ya:y1 - ya, x0 - xa:x1 - xa]
+                m = m[y0 - ya:y1 - ya, x0 - xa:x1 - xa]
+                o[ty0:ty1, tx0:tx1] = cv2.resize(m, (tx1 - tx0, ty1 - ty0),
+                                                 interpolation=cv2.INTER_AREA)
     return out
+
+
+def painting_crack_width(bgr, light, n=5):
+    """Typical crack width of the whole painting, from a few sample spots."""
+    H, W = bgr.shape[:2]
+    s = max(min(H, W) // 6, 128)
+    spots = [(0.5, 0.5), (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)][:n]
+    widths = []
+    for fx, fy in spots:
+        x, y = int(fx * W - s / 2), int(fy * H - s / 2)
+        x, y = max(0, min(x, W - s)), max(0, min(y, H - s))
+        widths.append(estimate_crack_width(bgr[y:y + s, x:x + s], light))
+    return int(min(widths))            # the cleanest spot: busy ones read too wide
 
 
 def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
     """Find the areas of a painting that are best for crack analysis.
 
-    Each square window (overlapping, stride = size/4) is scored on
-      crack network : how much long, connected crack line it contains (capped)
-      cleanliness   : share of detected crack pixels that are long lines, not specks
-      contrast      : how far the cracks stand out from the paint's own noise
+    Cracks are detected at full resolution, block by block. Each square
+    window (overlapping, stride = size/4) is then scored on
+      crack evidence: long, connected crack lines (relative to the painting's
+                      best), that are clean (not specks) and stand out from the
+                      paint's own noise (contrast)            - the main factor
       flatness      : little colour spread, i.e. no objects, outlines or folds
+                      (a bonus, not a requirement)
       exposure      : no blown highlights or crushed shadows
     Both dark and light cracks are tried (polarity="auto"), or only one.
-    Returns (areas, heat) where areas = [(x, y, w, h, score, light), ...] in
-    full-image pixels, best first and not overlapping, and heat is a 0..1 map.
+    Returns (areas, heat, crackmap): areas = [(x, y, w, h, score, light), ...]
+    in full-image pixels, best first and not overlapping; heat is a 0..1 map;
+    crackmap is a picture of every crack found, with the areas drawn on it.
     """
     H, W = bgr.shape[:2]
     size = int(size or max(min(H, W) // 5, min(300, min(H, W) // 2)))   # >= 300 px if it fits
@@ -388,10 +421,17 @@ def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
         I_col += [cv2.integral(ch), cv2.integral(ch * ch)]
     clip = ((gray >= 250) | (gray <= 5)).astype(np.float32)
     I_clip = cv2.integral(clip)
+    I_gray = cv2.integral(gray.astype(np.float32))
 
     pols = {"auto": (0, 1), "dark": (0,), "light": (1,)}[polarity]
-    maps = {pol: [cv2.integral(m) for m in blockwise_maps(small, pol, max(ws // 2, 32))]
-            for pol in pols}
+    block = max(size // 2, 128)
+    raw, maps, cws = {}, {}, {}
+    for pol in pols:
+        cws[pol] = painting_crack_width(bgr, pol)
+        print(f"  looking for {'light' if pol else 'dark'} cracks "
+              f"(typical width ~{cws[pol]} px) ...")
+        raw[pol] = blockwise_maps(bgr, pol, block, cws[pol], (h, w))
+        maps[pol] = [cv2.integral(m) for m in raw[pol]]
 
     ys = list(range(0, h - ws + 1, step)) or [0]
     xs = list(range(0, w - ws + 1, step)) or [0]
@@ -404,6 +444,7 @@ def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
                 var += max(_box_mean(I2, x, y, ws, ws) - m * m, 0.0)
             g = np.sqrt(var)                                            # colour spread
             c = _box_mean(I_clip, x, y, ws, ws)
+            bright = _box_mean(I_gray, x, y, ws, ws)
             for pol in pols:
                 sk, net, dsk, bg, dbg, d2bg = (_box_mean(I, x, y, ws, ws) for I in maps[pol])
                 clean_frac = net / sk if sk > 0 else 0.0
@@ -414,17 +455,33 @@ def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
                 else:
                     noise = np.inf
                 snr = contrast / (noise + 1e-6)
-                wins.append([x, y, net, clean_frac, g, c, snr, pol])
+                wins.append([x, y, net, clean_frac, g, c, snr, sk, bright, pol])
     if not wins:
-        return [], np.zeros((H, W), np.float32)
+        return [], np.zeros((H, W), np.float32), small.copy()
 
-    arr = np.array([wv[2:7] for wv in wins], dtype=np.float64)
-    net, clean_frac, grad_, clip_, snr = arr.T
-    score = (np.clip(net / AUTO_NET_FULL, 0, 1)               # enough crack network (capped:
-             * clean_frac                                     #  floods of noise earn no more)
-             * np.clip((snr - 2.0) / 4.0, 0, 1) ** 2          # cracks stand out from paint noise
-             * np.exp(-(grad_ / AUTO_COLOUR) ** 2)            # flat: no objects or folds
-             * np.clip(1 - 5 * clip_, 0, 1))                  # not over/under-exposed
+    arr = np.array([wv[2:9] for wv in wins], dtype=np.float64)
+    net, clean_frac, colour, clip_, snr, dens, bright = arr.T
+    is_light = np.array([wv[-1] for wv in wins]) == 1
+    # real craquelure covers a few % of the area; a denser "crack" mesh is paint
+    # texture or noise (seen in dark, busy areas), however long its lines are
+    plausible = np.clip(1 - (dens - AUTO_DENSE) / AUTO_DENSE, 0, 1)
+    ok = plausible > 0.5
+    net_ref = max(np.percentile(net[ok] if ok.any() else net, 90), 1e-9)   # "a lot of cracks" here
+    evidence = (np.clip(net / net_ref, 0, 1)                  # much long crack line
+                * clean_frac                                  # lines, not specks
+                * np.clip((snr - 2.0) / 4.0, 0, 1) ** 2       # stands out from paint noise
+                * plausible)                                  # not an implausibly dense mesh
+    if len(pols) == 2:
+        # the true crack colour is the one that stands out more from the paint;
+        # the other polarity only picks up rims and texture, so it may not compete
+        pair = snr.reshape(-1, 2)                             # (dark, light) per window
+        loser = np.where(pair[:, 0] >= pair[:, 1], 1, 0)
+        evidence.reshape(-1, 2)[np.arange(len(pair)), loser] = 0
+    # light cracks (pale ground showing through) only make sense on darker paint;
+    # on bright paint a "light crack" is just a highlight rim or texture
+    evidence[is_light & (bright > AUTO_LIGHT_MAX)] = 0
+    flat = np.exp(-(colour / AUTO_COLOUR) ** 2)               # no objects or folds
+    score = evidence * (AUTO_FLAT_MIN + (1 - AUTO_FLAT_MIN) * flat) * np.clip(1 - 5 * clip_, 0, 1)
     if score.max() > 0:
         score = score / score.max()
     find_areas.debug = (wins, arr, score, sc, ws)             # for tuning / inspection
@@ -432,6 +489,27 @@ def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
     heat = np.zeros((h, w), np.float32)
     for (x, y, *_), s_ in zip(wins, score):
         heat[y:y + ws, x:x + ws] = np.maximum(heat[y:y + ws, x:x + ws], s_)
+
+    # crack map: every crack found, in the polarity that scores better locally
+    best_pol = np.zeros((h, w), np.int8)
+    if len(pols) == 2:
+        ev = {}
+        for pol in pols:
+            e = np.zeros((h, w), np.float32)
+            for (x, y, *_r), s_ in zip(wins, evidence):
+                if _r[-1] == pol:
+                    e[y:y + ws, x:x + ws] = np.maximum(e[y:y + ws, x:x + ws], s_)
+            ev[pol] = e
+        best_pol = (ev[1] > ev[0]).astype(np.int8)
+    else:
+        best_pol[:] = pols[0]
+    cracks = np.zeros((h, w), bool)
+    for pol in pols:
+        cracks |= (raw[pol][0] > 0) & (best_pol == pol)
+    crackmap = (cv2.cvtColor(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+                * 0.55).astype(np.uint8)
+    crackmap[cracks] = (0, 0, 255)
+
     heat = cv2.resize(heat, (W, H), interpolation=cv2.INTER_LINEAR)
 
     areas, taken = [], []
@@ -443,8 +521,13 @@ def find_areas(bgr, size=None, n_areas=3, polarity="auto"):
             continue                                              # overlaps a better area
         taken.append((x, y))
         fx, fy = int(round(x / sc)), int(round(y / sc))
-        areas.append((fx, fy, min(size, W - fx), min(size, H - fy), float(score[i]), wins[i][7]))
-    return areas, heat
+        areas.append((fx, fy, min(size, W - fx), min(size, H - fy), float(score[i]), wins[i][-1]))
+    for i, (x, y, ww, hh, s_, lt) in enumerate(areas, 1):
+        p0 = (int(x * sc), int(y * sc)); p1 = (int((x + ww) * sc), int((y + hh) * sc))
+        cv2.rectangle(crackmap, p0, p1, (255, 255, 255), 2)
+        cv2.putText(crackmap, f"#{i}", (p0[0] + 5, p0[1] + 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    return areas, heat, crackmap
 
 
 def estimate_crack_width(bgr, light):
@@ -704,7 +787,7 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
 def auto_areas(img, args):
     """Find the best areas and the settings for each: [(roi, params), ...]."""
     print("finding the best areas for crack analysis ...")
-    areas, heat = find_areas(img, args.size, args.areas, args.polarity)
+    areas, heat, crackmap = find_areas(img, args.size, args.areas, args.polarity)
     out = []
     for i, (x, y, w, h, score, light) in enumerate(areas, 1):
         crop = img[y:y + h, x:x + w]
@@ -714,14 +797,19 @@ def auto_areas(img, args):
         print(f"  area {i}: x={x} y={y} size={w}x{h}  score={score:.2f}  "
               f"{'light' if light else 'dark'} cracks  crack width~{p['crack_width']} px")
         out.append(((x, y, w, h), p))
-    return out, area_map(img, areas, heat)
+    if not areas:
+        print("  no area with clear cracks found")
+    return out, area_map(img, areas, heat), crackmap
 
 
-def show_area_map(amap):
-    """Show the area map; ENTER/SPACE = use these areas, ESC = draw my own."""
-    win = "best areas   (ENTER = analyse these,  ESC = draw my own)"
+def show_area_map(amap, crackmap):
+    """Show the area map and the crack map side by side;
+    ENTER/SPACE = use these areas, ESC = draw my own."""
+    win = "left: best areas (red = good)   right: cracks found (red)   ENTER = analyse,  ESC = draw my own"
     sw, sh = screen_size()
-    _, disp = fit_to_screen(amap, sw - 80, sh - 140)
+    cm = cv2.resize(crackmap, (amap.shape[1], amap.shape[0]), interpolation=cv2.INTER_NEAREST)
+    both = np.hstack([amap, np.full((amap.shape[0], 8, 3), 60, np.uint8), cm])
+    _, disp = fit_to_screen(both, sw - 80, sh - 140)
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
     cv2.imshow(win, disp)
     while True:
@@ -744,9 +832,10 @@ def run_batch(path, args, kind="auto"):
     out_dir = os.path.abspath(args.out or os.path.splitext(path)[0] + "_cracks")
     stem = os.path.splitext(os.path.basename(path))[0]
     print(f"\n{path}\nresults will be saved in: {out_dir}")
-    found, amap = auto_areas(img, args)
+    found, amap, crackmap = auto_areas(img, args)
     os.makedirs(out_dir, exist_ok=True)
     imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
+    imwrite(os.path.join(out_dir, stem + "_crackmap.jpg"), crackmap)
     for i, ((x, y, w, h), p) in enumerate(found, 1):
         crop = img[y:y + h, x:x + w]
         save(out_dir, f"{stem}_{kind}{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
@@ -802,10 +891,11 @@ def main():
     base["light"] = int(args.light)
     jobs = []                                          # [(roi, params or None, tag)]
     if args.auto:
-        found, amap = auto_areas(img, args)
+        found, amap, crackmap = auto_areas(img, args)
         os.makedirs(out_dir, exist_ok=True)
         imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
-        if found and show_area_map(amap):
+        imwrite(os.path.join(out_dir, stem + "_crackmap.jpg"), crackmap)
+        if found and show_area_map(amap, crackmap):
             jobs = [(roi, p, f"{stem}_checked{i}") for i, (roi, p) in enumerate(found, 1)]
         elif not found:
             print("no suitable area found - draw your own")
