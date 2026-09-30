@@ -43,6 +43,7 @@ Then:
        texture cut     higher = more faint brush/canvas texture removed
        sensitivity     binary: higher = fainter cracks kept, lower = only strong ones
        clean-up        binary: delete pieces smaller than this many pixels
+       trim spurs      skeleton: cut short side "ticks" (dead-end branches) shorter than this
     Tune the enhanced picture first; the binary and skeleton follow from it.
     Results go to  <image name>_cracks/  next to the image:
        *_enhanced.png  paint flattened to an even grey, cracks in black
@@ -134,9 +135,35 @@ def clean(binary, min_area, bridge=0):
     return keep[lab]
 
 
-def thin(binary, min_len=0):
-    """Step 6: 1-px skeleton; optionally drop skeleton pieces shorter than min_len."""
-    sk = skeletonize(binary)
+def prune(sk, max_len):
+    """Cut short dead-end side branches ('ticks') off a skeleton.
+
+    Classic pruning: peel free ends off one pixel at a time, max_len times, so
+    every branch shorter than max_len disappears; then grow the surviving ends
+    back along the original skeleton so long cracks keep their full length.
+    """
+    if max_len <= 0:
+        return sk
+    k = np.ones((3, 3), np.float32); k[1, 1] = 0
+    orig = sk.astype(np.uint8)
+    cur = orig.copy()
+    for _ in range(int(max_len)):
+        nb = cv2.filter2D(cur, cv2.CV_32F, k, borderType=cv2.BORDER_CONSTANT)
+        ends = (cur == 1) & (nb <= 1)
+        if not ends.any():
+            break
+        cur[ends] = 0
+    nb = cv2.filter2D(cur, cv2.CV_32F, k, borderType=cv2.BORDER_CONSTANT)
+    grow = ((cur == 1) & (nb == 1)).astype(np.uint8)       # surviving free ends
+    for _ in range(int(max_len)):
+        grow = cv2.dilate(grow, np.ones((3, 3), np.uint8)) & orig
+    return (cur | grow).astype(bool)
+
+
+def thin(binary, min_len=0, spur_len=0):
+    """Step 6: 1-px skeleton; trim spurs shorter than spur_len, then drop
+    skeleton pieces shorter than min_len."""
+    sk = prune(skeletonize(binary), spur_len)
     if min_len > 0:
         n, lab, stats, _ = cv2.connectedComponentsWithStats(sk.astype(np.uint8), connectivity=8)
         keep = np.zeros(n, dtype=bool)
@@ -205,7 +232,7 @@ def extract(bgr, p, paper=False):
     else:
         binary = binary_from_enhanced(enh, sens)
     binary = clean(binary, cleanup)
-    skel = thin(binary, cleanup // 2)
+    skel = thin(binary, cleanup // 2, p["spurs"])
     return dict(enhanced=enh, binary=binary, skeleton=skel)
 
 
@@ -251,6 +278,7 @@ SLIDERS = [  # name, key, max, default
     ("texture cut", "texture", 40, 16),       # enhanced picture: remove faint texture
     ("sensitivity", "sensitivity", 20, 10),   # binary: higher = fainter cracks kept
     ("clean-up", "cleanup", 200, 20),         # binary: delete pieces smaller than this
+    ("trim spurs px", "spurs", 50, 8),        # skeleton: cut side ticks shorter than this
 ]
 
 VIEW_WIN = "craquelure - pictures   (v = change view)"
