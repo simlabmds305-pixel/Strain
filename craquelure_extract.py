@@ -26,11 +26,14 @@ Usage
 Then:
     1. Drag a rectangle over the area you want, press ENTER/SPACE
        (you can draw several; press ESC when finished with all of them).
-    2. A tuning window opens for each area. Move the sliders until the
-       "binary" panel matches the cracks you see. Keys:
+    2. Two windows open for each area: a narrow "sliders" window on the left
+       and a large "pictures" window beside it. Move the sliders until the
+       enhanced picture shows the cracks clearly. Keys (click either window first):
           s  save this area and go to the next one
           n  skip this area
           q  quit
+          v  change the picture view: original | enhanced  ->  enhanced only
+             ->  all four (adds the paper's binary and skeleton)
        The "light cracks" switch (0/1) is for areas where the cracks look
        lighter than the paint, e.g. pale cracks on dark cloth.
     Results go to  <image name>_cracks/  next to the image. The main one is
@@ -221,7 +224,29 @@ SLIDERS = [  # name, key, max, default
     ("flatten bg px", "flatten_bg", 200, 0),
 ]
 
-WIN = "craquelure - tune (s=save  n=skip  q=quit)"
+VIEW_WIN = "craquelure - pictures   (v = change view)"
+CTRL_WIN = "sliders   (s = save  n = skip  q = quit  v = view)"
+CTRL_W = 420          # width of the slider window, px
+VIEWS = ["original | enhanced", "enhanced only", "all four"]
+
+
+def screen_size():
+    """Usable screen size in px (falls back to 1600x900)."""
+    try:
+        import ctypes                                   # Windows
+        u = ctypes.windll.user32
+        u.SetProcessDPIAware()
+        return u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+    except Exception:
+        pass
+    try:
+        import tkinter as tk
+        r = tk.Tk(); r.withdraw()
+        wh = r.winfo_screenwidth(), r.winfo_screenheight()
+        r.destroy()
+        return wh
+    except Exception:
+        return 1600, 900
 
 
 def pick_image():
@@ -235,10 +260,14 @@ def pick_image():
     return path
 
 
-def fit_to_screen(img, max_w=1400, max_h=850):
+def fit_to_screen(img, max_w=1400, max_h=850, upscale=1.0):
+    """Scale img to fit max_w x max_h; small images may grow up to `upscale` x."""
     h, w = img.shape[:2]
-    s = min(max_w / w, max_h / h, 1.0)
-    return s, (cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA) if s < 1 else img)
+    s = min(max_w / w, max_h / h, upscale)
+    if abs(s - 1) < 1e-3:
+        return 1.0, img
+    interp = cv2.INTER_AREA if s < 1 else cv2.INTER_NEAREST   # nearest keeps cracks crisp
+    return s, cv2.resize(img, (max(int(w * s), 1), max(int(h * s), 1)), interpolation=interp)
 
 
 def check_gui():
@@ -256,7 +285,8 @@ def check_gui():
 
 
 def select_rois(img):
-    s, disp = fit_to_screen(img)
+    sw, sh = screen_size()
+    s, disp = fit_to_screen(img, sw - 80, sh - 140)
     print("Draw a box, ENTER/SPACE to accept it. Draw more if you like. ESC when done.")
     rois = cv2.selectROIs("select crack area(s)  -  ESC when done", disp, showCrosshair=False)
     cv2.destroyWindow("select crack area(s)  -  ESC when done")
@@ -267,42 +297,94 @@ def select_rois(img):
     return out
 
 
-def panel(crop, res):
-    """2x2 overview: original | enhanced / binary | skeleton overlay."""
+def panel(crop, res, view, max_w, max_h):
+    """Picture for the view window, already scaled to max_w x max_h, with labels."""
     def gray3(g):
         return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-    bin_img = gray3(np.where(res["binary"], 0, 255).astype(np.uint8))      # black cracks on white
-    skel = cv2.dilate(res["skeleton"].astype(np.uint8), np.ones((2, 2), np.uint8)).astype(bool)
-    overlay = crop.copy(); overlay[skel] = (0, 0, 255)
-    top = np.hstack([crop, gray3(res["enhanced"])])
-    bot = np.hstack([bin_img, overlay])
-    grid = np.vstack([top, bot])
-    for txt, (x, y) in [("original", (0, 0)), ("enhanced", (1, 0)),
-                        ("binary", (0, 1)), ("skeleton overlay", (1, 1))]:
-        cv2.putText(grid, txt, (x * crop.shape[1] + 8, y * crop.shape[0] + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
-    return grid
+    enh = gray3(res["enhanced"])
+    if view == 1:
+        tiles = [[("enhanced", enh)]]
+    elif view == 2:
+        bin_img = gray3(np.where(res["binary"], 0, 255).astype(np.uint8))
+        skel = cv2.dilate(res["skeleton"].astype(np.uint8), np.ones((2, 2), np.uint8)).astype(bool)
+        overlay = crop.copy(); overlay[skel] = (0, 0, 255)
+        tiles = [[("original", crop), ("enhanced", enh)],
+                 [("binary", bin_img), ("skeleton overlay", overlay)]]
+    else:
+        tiles = [[("original", crop), ("enhanced", enh)]]
+    rows, cols = len(tiles), len(tiles[0])
+    gap = 6
+    h, w = crop.shape[:2]
+    s, _ = fit_to_screen(crop, (max_w - gap * (cols - 1)) / cols,
+                         (max_h - gap * (rows - 1)) / rows, upscale=6.0)
+    tw, th = max(int(w * s), 1), max(int(h * s), 1)
+    interp = cv2.INTER_AREA if s < 1 else cv2.INTER_NEAREST
+    canvas = np.full((rows * th + gap * (rows - 1), cols * tw + gap * (cols - 1), 3), 60, np.uint8)
+    for r, row in enumerate(tiles):
+        for c, (label, img) in enumerate(row):
+            y, x = r * (th + gap), c * (tw + gap)
+            canvas[y:y + th, x:x + tw] = cv2.resize(img, (tw, th), interpolation=interp)
+            cv2.putText(canvas, label, (x + 8, y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(canvas, label, (x + 8, y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (0, 220, 255), 2, cv2.LINE_AA)
+    return canvas
 
 
-def tune(crop, params):
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+def _ctrl_image():
+    """Small help strip shown under the sliders."""
+    img = np.full((70, CTRL_W, 3), 40, np.uint8)
+    for i, t in enumerate(["s = save   n = skip   q = quit", "v = change picture view"]):
+        cv2.putText(img, t, (10, 26 + 28 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (230, 230, 230), 1, cv2.LINE_AA)
+    return img
+
+
+def tune(crop, params, view=0):
+    """Sliders in their own narrow window, pictures in a large one.
+
+    Returns (action, params, results, view)."""
+    sw, sh = screen_size()
+    max_w, max_h = sw - CTRL_W - 60, sh - 120          # room left for the pictures
+
+    cv2.namedWindow(CTRL_WIN, cv2.WINDOW_NORMAL)
     for name, key, mx, _ in SLIDERS:
-        cv2.createTrackbar(name, WIN, int(params[key]), mx, lambda v: None)
-    last, res = None, None
+        cv2.createTrackbar(name, CTRL_WIN, int(params[key]), mx, lambda v: None)
+    cv2.imshow(CTRL_WIN, _ctrl_image())
+    cv2.resizeWindow(CTRL_WIN, CTRL_W, 40 * len(SLIDERS) + 70)
+    cv2.moveWindow(CTRL_WIN, 0, 0)
+
+    cv2.namedWindow(VIEW_WIN, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(VIEW_WIN, CTRL_W + 20, 0)
+
+    last, res, shown_view = None, None, None
     while True:
-        cur = {key: cv2.getTrackbarPos(name, WIN) for name, key, _, _ in SLIDERS}
+        try:
+            cur = {key: cv2.getTrackbarPos(name, CTRL_WIN) for name, key, _, _ in SLIDERS}
+        except cv2.error:                              # slider window was closed
+            cv2.destroyAllWindows()
+            return "q", last, res, view
         cur["crack_width"] = max(cur["crack_width"], 1)
         if cur != last:
             res = extract(crop, cur)
-            _, disp = fit_to_screen(panel(crop, res))
-            cv2.imshow(WIN, disp)
             last = dict(cur)
+            shown_view = None
+        if shown_view != view:
+            pic = panel(crop, res, view, max_w, max_h)
+            cv2.imshow(VIEW_WIN, pic)
+            cv2.resizeWindow(VIEW_WIN, pic.shape[1], pic.shape[0])
+            shown_view = view
         k = cv2.waitKey(50) & 0xFF
-        if k in (ord("s"), ord("n"), ord("q"), 27):
-            cv2.destroyWindow(WIN)
-            return chr(k) if k != 27 else "q", last, res
-        if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
-            return "q", last, res
+        if k == ord("v"):
+            view = (view + 1) % len(VIEWS)
+            print(f"  view: {VIEWS[view]}")
+        elif k in (ord("s"), ord("n"), ord("q"), 27):
+            cv2.destroyWindow(VIEW_WIN); cv2.destroyWindow(CTRL_WIN)
+            return (chr(k) if k != 27 else "q"), last, res, view
+        if (cv2.getWindowProperty(VIEW_WIN, cv2.WND_PROP_VISIBLE) < 1 or
+                cv2.getWindowProperty(CTRL_WIN, cv2.WND_PROP_VISIBLE) < 1):
+            cv2.destroyAllWindows()
+            return "q", last, res, view
 
 
 def imwrite(path, img):
@@ -361,11 +443,12 @@ def main():
 
     params = {key: d for _, key, _, d in SLIDERS}
     params["light"] = int(args.light)
+    view = 0
     for i, (x, y, w, h) in enumerate(rois, 1):
         crop = img[y:y + h, x:x + w]
         print(f"area {i}/{len(rois)}: x={x} y={y} w={w} h={h}")
-        print("  click on the tuning window, then press  s = save,  n = skip,  q = quit")
-        action, used, res = tune(crop, params)
+        print("  click on either window, then press  s = save,  n = skip,  q = quit,  v = view")
+        action, used, res, view = tune(crop, params, view)
         if action == "q":
             break
         params = used                                  # carry settings to next area
