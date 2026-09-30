@@ -6,15 +6,16 @@ Follows the extraction stage of
     geographical and condition-based analysis of artworks using craquelure
     pattern recognition techniques", Insight 56(3), 2014.
 
-Pipeline (paper section "Crack detection and extraction"):
+Pipeline:
     1. greyscale
     2. morphological CLOSING with a disk slightly wider than the cracks
        -> the dark, thin cracks are filled in with the surrounding paint colour
-    3. closed - original  (= black-hat)  -> an image that contains only the cracks
-    4. OFFSET THRESHOLDING: split into square tiles, Otsu-threshold each tile,
-       do it again with the tile grid shifted by half a tile, keep only the
-       pixels that are cracks in BOTH results (true cracks agree, noise doesn't).
-       A minimum threshold stops tiles without cracks from "forcing" cracks.
+    3. ENHANCED picture: original / closed -> every paint colour becomes the
+       same light grey and only the cracks stay dark
+    4. BINARY: the dark parts of the enhanced picture (hysteresis threshold).
+       With --paper, the paper's OFFSET THRESHOLDING is used instead: Otsu per
+       square tile, repeated with the tiles shifted by half a tile, keeping only
+       pixels that are cracks in BOTH (true cracks agree, noise doesn't).
     5. clean: delete isolated specks / short fragments
     6. thin to 1-pixel-wide crack lines (skeleton)
 
@@ -22,6 +23,7 @@ Usage
     python craquelure_extract.py                 # file dialog to pick an image
     python craquelure_extract.py painting.jpg    # or give the path
     python craquelure_extract.py painting.jpg --light   # cracks brighter than paint
+    python craquelure_extract.py painting.jpg --paper   # paper's binary method
 
 Then:
     1. Drag a rectangle over the area you want, press ENTER/SPACE
@@ -34,12 +36,19 @@ Then:
           q  quit
           v  change the picture view: original | enhanced  ->  enhanced only
              ->  all four (adds the paper's binary and skeleton)
-       The "light cracks" switch (0/1) is for areas where the cracks look
-       lighter than the paint, e.g. pale cracks on dark cloth.
-    Results go to  <image name>_cracks/  next to the image. The main one is
-    *_enhanced.png: paint flattened to an even grey, cracks in black (use the
-    "contrast" and "texture cut" sliders for it). *_binary.png and
-    *_skeleton.png are the paper's thresholded and thinned versions.
+    Sliders, in order of use:
+       light cracks    0 = dark cracks, 1 = cracks paler than the paint
+       crack width     slightly wider than the thickest crack (pixels)
+       contrast        higher = cracks in the enhanced picture go blacker
+       texture cut     higher = more faint brush/canvas texture removed
+       sensitivity     binary: higher = fainter cracks kept, lower = only strong ones
+       clean-up        binary: delete pieces smaller than this many pixels
+    Tune the enhanced picture first; the binary and skeleton follow from it.
+    Results go to  <image name>_cracks/  next to the image:
+       *_enhanced.png  paint flattened to an even grey, cracks in black
+       *_binary.png    cracks black on white
+       *_skeleton.png  cracks thinned to 1-pixel lines
+       *_overlay.png, *_original.png, *_info.json (settings and crack counts)
 
 Requirements:  pip install opencv-python numpy scikit-image
 """
@@ -162,20 +171,45 @@ def enhance(bgr, crack_width, light=False, contrast=10, texture=16):
 ENH_BG = 195   # grey level of the paint in the enhanced picture
 
 
-def extract(bgr, p):
-    """Run the whole pipeline with parameter dict p. Returns dict of images."""
-    gray = to_gray(bgr, p["flatten_bg"])
-    resp, closed = crack_response(gray, p["crack_width"], p["light"], p["denoise"])
-    # scale by the 99.5th percentile, not the max, so one dark stain or hole
-    # does not squash every real crack into the bottom few grey levels
-    hi = max(float(np.percentile(resp, 99.5)), 1.0)
-    resp_n = np.clip(resp.astype(np.float32) * (255.0 / hi), 0, 255).astype(np.uint8)
-    binary = offset_threshold(resp_n, max(p["tile"], 4), p["min_thresh"])
-    binary = clean(binary, p["min_area"], p["bridge"])
-    skel = thin(binary, p["min_len"])
+def binary_from_enhanced(enh, sensitivity):
+    """Cracks = what is dark in the enhanced picture (hysteresis threshold).
+
+    Clearly dark pixels start a crack; fainter pixels are kept only where they
+    connect to one, so cracks stay continuous but loose texture is dropped.
+    sensitivity 0..20: higher finds fainter cracks.
+    """
+    from skimage.filters import apply_hysteresis_threshold
+    dark = (ENH_BG - enh.astype(np.float32)) / ENH_BG          # 0 = paint, 1 = black
+    hi = float(np.clip(0.8 - 0.04 * sensitivity, 0.05, 0.95))
+    return apply_hysteresis_threshold(dark, 0.375 * hi, hi)
+
+
+def extract(bgr, p, paper=False):
+    """Run the whole pipeline with parameter dict p. Returns dict of images.
+
+    paper=False: binary = dark parts of the enhanced picture (default).
+    paper=True : binary = the paper's offset (shifted-tile Otsu) threshold of the
+                 closing-minus-original image.
+    Both use the same two sliders: sensitivity and clean-up.
+    """
     enh = enhance(bgr, p["crack_width"], p["light"], p["contrast"], p["texture"])
-    return dict(gray=gray, closed=closed, response=resp_n, enhanced=enh,
-                binary=binary, skeleton=skel)
+    sens, cleanup = p["sensitivity"], p["cleanup"]
+    if paper:
+        gray = to_gray(bgr)
+        resp, _ = crack_response(gray, p["crack_width"], p["light"])
+        # scale by the 99.5th percentile, not the max, so one dark stain or hole
+        # does not squash every real crack into the bottom few grey levels
+        hi = max(float(np.percentile(resp, 99.5)), 1.0)
+        resp_n = np.clip(resp.astype(np.float32) * (255.0 / hi), 0, 255).astype(np.uint8)
+        binary = offset_threshold(resp_n, PAPER_TILE, max(0, 120 - 6 * sens))
+    else:
+        binary = binary_from_enhanced(enh, sens)
+    binary = clean(binary, cleanup)
+    skel = thin(binary, cleanup // 2)
+    return dict(enhanced=enh, binary=binary, skeleton=skel)
+
+
+PAPER_TILE = 40   # tile size (px) for the paper's offset threshold
 
 
 # ----------------------------------------------------------------------------
@@ -215,13 +249,8 @@ SLIDERS = [  # name, key, max, default
     ("crack width px", "crack_width", 25, 2),
     ("contrast", "contrast", 50, 10),         # enhanced picture: how black the cracks go
     ("texture cut", "texture", 40, 16),       # enhanced picture: remove faint texture
-    ("tile px", "tile", 200, 40),
-    ("min thresh", "min_thresh", 255, 60),
-    ("min area px", "min_area", 500, 30),
-    ("min skel len", "min_len", 300, 10),
-    ("bridge gaps px", "bridge", 5, 0),
-    ("denoise", "denoise", 10, 0),
-    ("flatten bg px", "flatten_bg", 200, 0),
+    ("sensitivity", "sensitivity", 20, 10),   # binary: higher = fainter cracks kept
+    ("clean-up", "cleanup", 200, 20),         # binary: delete pieces smaller than this
 ]
 
 VIEW_WIN = "craquelure - pictures   (v = change view)"
@@ -340,7 +369,7 @@ def _ctrl_image():
     return img
 
 
-def tune(crop, params, view=0):
+def tune(crop, params, view=0, paper=False):
     """Sliders in their own narrow window, pictures in a large one.
 
     Returns (action, params, results, view)."""
@@ -366,7 +395,7 @@ def tune(crop, params, view=0):
             return "q", last, res, view
         cur["crack_width"] = max(cur["crack_width"], 1)
         if cur != last:
-            res = extract(crop, cur)
+            res = extract(crop, cur, paper)
             last = dict(cur)
             shown_view = None
         if shown_view != view:
@@ -406,7 +435,6 @@ def save(out_dir, tag, crop, res, params, roi):
     b = os.path.join(out_dir, tag)
     imwrite(b + "_original.png", crop)
     imwrite(b + "_enhanced.png", res["enhanced"])                            # main result
-    imwrite(b + "_response.png", 255 - res["response"])                       # dark cracks
     imwrite(b + "_binary.png", np.where(res["binary"], 0, 255).astype(np.uint8))
     imwrite(b + "_skeleton.png", np.where(res["skeleton"], 0, 255).astype(np.uint8))
     ov = crop.copy(); ov[res["skeleton"]] = (0, 0, 255)
@@ -422,6 +450,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image", nargs="?", help="painting image (omit for a file dialog)")
     ap.add_argument("--light", action="store_true", help="start with the light-cracks switch on")
+    ap.add_argument("--paper", action="store_true",
+                    help="make the binary with the paper's offset (shifted-tile Otsu) threshold")
     ap.add_argument("--out", help="output folder (default <image>_cracks)")
     args = ap.parse_args()
 
@@ -448,7 +478,7 @@ def main():
         crop = img[y:y + h, x:x + w]
         print(f"area {i}/{len(rois)}: x={x} y={y} w={w} h={h}")
         print("  click on either window, then press  s = save,  n = skip,  q = quit,  v = view")
-        action, used, res, view = tune(crop, params, view)
+        action, used, res, view = tune(crop, params, view, args.paper)
         if action == "q":
             break
         params = used                                  # carry settings to next area
