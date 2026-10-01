@@ -20,41 +20,46 @@ Pipeline:
     6. thin to 1-pixel-wide crack lines (skeleton)
 
 Usage
-    python craquelure_extract.py                   # file dialog: pick one or many images
-    python craquelure_extract.py SK-A-2344.jpg     # one image
-    python craquelure_extract.py C:\\cracks        # every image in a folder, one by one
-    python craquelure_extract.py SK-A-2344.jpg --batch   # ONE image, areas found for you
+    python craquelure_extract.py SK-A-2344.jpg            # draw box(es) yourself, tune with sliders
+    python craquelure_extract.py SK-A-2344.jpg --auto     # areas found for you, check & tune them
+    python craquelure_extract.py SK-A-2344.jpg --batch    # areas found and saved, no windows
+    python craquelure_extract.py C:\\cracks --batch       # ... for every image in a folder
+    python craquelure_extract.py C:\\cracks --select      # draw boxes on every image in turn,
+                                                          #   each box processed automatically
+    (no image name opens a file dialog; with --select you can Ctrl-click several)
 
-Selecting areas (the normal way)
+--auto / --batch: automatic area finder
+    The painting is cut into overlapping squares scored on crack evidence (long,
+    clean crack lines that stand out from the paint's noise), flatness (no
+    objects or folds) and exposure. --auto shows the result (ENTER = use these
+    areas, ESC = draw your own) and opens the sliders for each; --batch saves
+    straight away. Options: --areas 3 (how many), --size 800 (square size, px).
+    Two maps are saved:
+       *_areas.jpg     where the good areas are (red = good), numbered
+       *_crackmap.jpg  every crack found (red), areas outlined - check the areas
+                       really sit on cracks
+
+--select: you choose, the program processes
     Each image opens in turn. Drag a box over cracked paint and press ENTER to
-    keep it; draw more boxes if you like; press ESC when done (ESC with no box
-    skips that image). Every box is then processed automatically and saved:
-       crack colour   dark or light, whichever stands out more from the paint
-                      (light cracks only on darker paint)
-       crack width    measured from the cracks in the box
-    and the next image opens. Stop at any time with Ctrl+C in the prompt.
-    Options:  --polarity dark|light   force the crack colour
-              --tune                  open the slider windows for each box instead
-                                      (s = save, n = skip, q = quit, v = view)
+    keep it; draw more if you like; press ESC when done (ESC with no box skips
+    that image). Every box gets automatic settings - crack colour (dark or light,
+    whichever stands out more; light only on darker paint) and crack width
+    measured from the box - and is saved. Ctrl+C in the prompt stops.
+    Add --tune to open the slider windows for each box instead.
 
---batch (one image, no windows)
-    Finds the best areas by itself: the painting is cut into overlapping squares
-    scored on crack evidence (long, clean crack lines that stand out from the
-    paint's noise), flatness (no objects or folds) and exposure. Options:
-    --areas 3 (how many), --size 800 (square size in px).
-    Also saves *_areas.jpg (red = good areas) and *_crackmap.jpg (every crack
-    found, in red, with the areas drawn on it - check the areas sit on cracks).
-
-Results go to  <image name>_cracks/  next to each image:
-    <name>_sel1_...      boxes you drew (sel2, sel3 ... for more boxes)
-    <name>_auto1_...     areas found by --batch
+Results go to  <image name>_cracks/  next to each image; names say how they were made:
+    <name>_roi1_...      boxes you drew and tuned (no option)
+    <name>_checked1_...  --auto areas you checked and saved with s
+    <name>_auto1_...     --batch on one image
+    <name>_F_auto1_...   --batch on a folder
+    <name>_sel1_...      --select boxes (plus <name>_selection.jpg showing them)
     for each:  _enhanced.png  paint flattened to an even grey, cracks in black
                _binary.png    cracks black on white
                _skeleton.png  cracks thinned to 1-pixel lines
                _overlay.png, _original.png, _info.json (settings and crack counts)
-    <name>_selection.jpg shows where your boxes were.
 
-Sliders (with --tune), in order of use:
+Tuning windows: s = save, n = skip, q = quit, v = change picture view.
+Sliders, in order of use:
     light cracks    0 = dark cracks, 1 = cracks paler than the paint
     crack width     slightly wider than the thickest crack (pixels)
     contrast        higher = cracks in the enhanced picture go blacker
@@ -870,68 +875,154 @@ def auto_areas(img, args):
     return out, area_map(img, areas, heat), crackmap
 
 
-def run_batch(path, args):
-    """--batch: find the best areas of ONE painting and save everything, no windows."""
+def show_area_map(amap, crackmap):
+    """Show the area map and the crack map side by side;
+    ENTER/SPACE = use these areas, ESC = draw my own."""
+    win = "left: best areas (red = good)   right: cracks found (red)   ENTER = analyse,  ESC = draw my own"
+    sw, sh = screen_size()
+    cm = cv2.resize(crackmap, (amap.shape[1], amap.shape[0]), interpolation=cv2.INTER_NEAREST)
+    both = np.hstack([amap, np.full((amap.shape[0], 8, 3), 60, np.uint8), cm])
+    _, disp = fit_to_screen(both, sw - 80, sh - 140)
+    cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+    cv2.imshow(win, disp)
+    while True:
+        k = cv2.waitKey(50) & 0xFF
+        if k in (13, 10, 32):
+            cv2.destroyWindow(win)
+            return True
+        if k in (27, ord("q")) or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
+            cv2.destroyWindow(win)
+            return False
+
+
+def run_batch(path, args, kind="auto"):
+    """No windows: find the best areas and save everything for them.
+    kind names the files: "auto" (one image) or "F_auto" (a folder run)."""
     img = imread(path)
     if img is None:
-        sys.exit(f"could not read {path}")
+        print(f"could not read {path} - skipped")
+        return
     out_dir = os.path.abspath(args.out or os.path.splitext(path)[0] + "_cracks")
     stem = os.path.splitext(os.path.basename(path))[0]
-    print(f"{path}\nresults will be saved in: {out_dir}")
+    print(f"\n{path}\nresults will be saved in: {out_dir}")
     found, amap, crackmap = auto_areas(img, args)
     os.makedirs(out_dir, exist_ok=True)
     imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
     imwrite(os.path.join(out_dir, stem + "_crackmap.jpg"), crackmap)
     for i, ((x, y, w, h), p) in enumerate(found, 1):
         crop = img[y:y + h, x:x + w]
-        save(out_dir, f"{stem}_auto{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
+        save(out_dir, f"{stem}_{kind}{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("images", nargs="*", help="painting image(s) or a folder of them "
-                                              "(omit for a file dialog)")
+    ap.add_argument("images", nargs="*", help="painting image (omit for a file dialog); with "
+                                              "--batch or --select also several images or a folder")
+    ap.add_argument("--auto", action="store_true",
+                    help="find the best areas automatically, then tune them in the windows")
     ap.add_argument("--batch", action="store_true",
-                    help="ONE image: find the best areas by itself and save, no windows")
+                    help="find the best areas and save the results without any windows")
+    ap.add_argument("--select", action="store_true",
+                    help="draw boxes on every image in turn; each box is processed automatically")
     ap.add_argument("--tune", action="store_true",
-                    help="after drawing a box, open the slider windows instead of saving directly")
-    ap.add_argument("--polarity", choices=["auto", "dark", "light"], default="auto",
-                    help="crack colour (default: chosen for each box)")
+                    help="with --select: open the slider windows for each box instead")
+    ap.add_argument("--light", action="store_true", help="start with the light-cracks switch on")
     ap.add_argument("--paper", action="store_true",
                     help="make the binary with the paper's offset (shifted-tile Otsu) threshold")
-    ap.add_argument("--areas", type=int, default=3, help="--batch: how many areas (default 3)")
-    ap.add_argument("--size", type=int, help="--batch: area size in pixels")
-    ap.add_argument("--out", help="output folder (default <image>_cracks next to each image)")
+    ap.add_argument("--areas", type=int, default=3, help="how many areas to find (default 3)")
+    ap.add_argument("--size", type=int, help="area size in pixels (default: 1/5 of the "
+                                             "painting's shorter side, at least 300)")
+    ap.add_argument("--polarity", choices=["auto", "dark", "light"], default="auto",
+                    help="crack colour (default: chosen automatically)")
+    ap.add_argument("--out", help="output folder (default <image>_cracks)")
     args = ap.parse_args()
 
-    paths = []
+    paths, from_folder = [], False
     for p in args.images:
         if os.path.isdir(p):
+            from_folder = True
             paths += sorted(os.path.join(p, f) for f in os.listdir(p)
                             if f.lower().endswith(IMG_EXTS))
         else:
             paths.append(p)
 
-    if args.batch:
-        if len(paths) != 1 or os.path.isdir(args.images[0]):
-            sys.exit("--batch works on ONE image, e.g.  python craquelure_extract.py SK-A-2344.jpg --batch")
-        run_batch(paths[0], args)
+    if args.select:                                    # draw boxes on every image
+        if not paths:
+            paths = pick_images()
+        if not paths:
+            sys.exit("no image chosen")
+        check_gui()
+        print(f"{len(paths)} image(s). For each: drag a box over cracks, ENTER to keep it, "
+              f"draw more if you like, ESC when done (ESC with no box skips the image).")
+        try:
+            for k, p in enumerate(paths, 1):
+                run_selected(p, args, k, len(paths))
+        except KeyboardInterrupt:
+            print("\nstopped - everything saved so far is kept")
+        cv2.destroyAllWindows()
+        print("\nall done")
         return
 
-    if not paths:
-        paths = pick_images()
-    if not paths:
+    if args.batch:                                     # no windows
+        if not paths:
+            paths = pick_images()[:1]
+        if not paths:
+            sys.exit("no image chosen")
+        if len(paths) > 1 and args.out:
+            print("note: --out is ignored for several images; each gets its own _cracks folder")
+            args.out = None
+        kind = "F_auto" if from_folder else "auto"
+        if from_folder:
+            print(f"{len(paths)} images")
+        for f in paths:
+            run_batch(f, args, kind)
+        return
+
+    if len(paths) > 1:
+        sys.exit("one image at a time here - for several use --select or --batch")
+    path = paths[0] if paths else (pick_images() or [None])[0]
+    if not path:
         sys.exit("no image chosen")
+    img = imread(path)
+    if img is None:
+        sys.exit(f"could not read {path}")
+    out_dir = os.path.abspath(args.out or os.path.splitext(path)[0] + "_cracks")
+    print(f"results will be saved in: {out_dir}")
+    stem = os.path.splitext(os.path.basename(path))[0]
+
     check_gui()
-    print(f"{len(paths)} image(s). For each: drag a box over cracks, ENTER to keep it, "
-          f"draw more if you like, ESC when done (ESC with no box skips the image).")
-    try:
-        for k, p in enumerate(paths, 1):
-            run_selected(p, args, k, len(paths))
-    except KeyboardInterrupt:
-        print("\nstopped - everything saved so far is kept")
+    base = {key: d for _, key, _, d in SLIDERS}
+    base["light"] = int(args.light)
+    jobs = []                                          # [(roi, params or None, tag)]
+    if args.auto:
+        found, amap, crackmap = auto_areas(img, args)
+        os.makedirs(out_dir, exist_ok=True)
+        imwrite(os.path.join(out_dir, stem + "_areas.jpg"), amap)
+        imwrite(os.path.join(out_dir, stem + "_crackmap.jpg"), crackmap)
+        if found and show_area_map(amap, crackmap):
+            jobs = [(roi, p, f"{stem}_checked{i}") for i, (roi, p) in enumerate(found, 1)]
+        elif not found:
+            print("no suitable area found - draw your own")
+    if not jobs:
+        rois = select_rois(img)
+        if not rois:
+            rois = [(0, 0, img.shape[1], img.shape[0])]
+            print("no box drawn - using the whole image")
+        jobs = [(roi, None, f"{stem}_roi{i}") for i, roi in enumerate(rois, 1)]
+
+    params, view = base, 0
+    for i, ((x, y, w, h), p_auto, tag) in enumerate(jobs, 1):
+        crop = img[y:y + h, x:x + w]
+        print(f"area {i}/{len(jobs)}: x={x} y={y} w={w} h={h}")
+        print("  click on either window, then press  s = save,  n = skip,  q = quit,  v = view")
+        start = dict(p_auto) if p_auto else params     # auto areas start from their own settings
+        action, used, res, view = tune(crop, start, view, args.paper)
+        if action == "q":
+            break
+        params = used                                  # carry settings to next hand-drawn area
+        if action == "s":
+            save(out_dir, tag, crop, res, used, [x, y, w, h])
     cv2.destroyAllWindows()
-    print("\nall done")
 
 
 if __name__ == "__main__":
