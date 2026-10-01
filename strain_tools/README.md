@@ -1,0 +1,195 @@
+# Bead volume → shrinkage strain
+
+A fast, scriptable version of the bead-volume notebook, built on the structure of
+the cantilever/Stoney tool: measure a folder of images, cross-check several
+estimators against each other, stamp a verdict on every frame, and save
+everything into `<folder>/analysis/` beside the data.
+
+The notebook (`../bead_volume_batch_multi_image.ipynb`) is unchanged and still
+works. This is the same physics, restructured.
+
+```
+python run_local.py /path/to/set --roi 1050,1950,1350,1720 --interval 30
+python run_local.py /path/to/parent --each          # every subfolder, in one go
+```
+
+Outputs, written into `<folder>/analysis/`:
+
+| file | what it is |
+|---|---|
+| `linear_strain.png` | linear strain vs **time**, with **image number** across the top |
+| `volumes.png` | all four estimators over the run |
+| `agreement.png` | how far apart the deciding estimators were, frame by frame |
+| `per_image.csv` | every number for every frame |
+| `summary.txt` | the headline, the verdict counts, and the warnings |
+| `settings.json` | exactly what was used, so a run can be reproduced |
+
+## Speed
+
+40 frames at 3088×2076, 4 cores:
+
+| | whole frame | with `--roi` |
+|---|---|---|
+| notebook | 65.3 s (1632 ms/frame) | — |
+| this, 1 worker | 28.0 s (699 ms/frame) | 6.8 s (170 ms/frame) |
+| this, 4 workers | **9.2 s (229 ms/frame)** | **2.0 s (51 ms/frame)** |
+
+Three changes account for it:
+
+1. **One decode per image.** The notebook read every file three times — once
+   greyscale, once in colour for the chroma gate, once more for the mat-edge
+   fit. Here the colour frame is decoded once and the grey and chroma images
+   are derived from it. Decoding alone is 154 ms/frame at this size.
+2. **A vectorised row profile.** `xs[ys == y]` per row rescans the whole
+   coordinate list once per row — quadratic in the silhouette, ~10⁹
+   comparisons on a 1000-row bead, and paid again for every candidate blob.
+   `argmax` on a boolean array does it in one pass.
+3. **Parallel across images**, one worker per core.
+
+Clipping a mask at the mat is also now a truncation of the profile rather than
+a full re-segmentation of the image, which is exactly equivalent (the clip was
+always applied after the blob was chosen) and free.
+
+One cost, stated plainly: deriving grey with `cvtColor` instead of
+`IMREAD_GRAYSCALE` differs by a rounding LSB, which can flip a pixel at the
+threshold. Measured against the notebook on 104 images, mean V_disk difference
+**+0.017%**, worst single frame 0.66%.
+
+## The four estimators
+
+All four integrate the silhouette as a stack of discs, `V = Σ π r² dz`. They
+differ **only** in what they do with the rows between the bead's widest row and
+the mat — the part front lighting loses to the bead's own shadow.
+
+| | what it does | fails when |
+|---|---|---|
+| `V_disk` | integrates exactly the rows the threshold found | the mask stops short of the mat |
+| `V_trunc` | stops at the widest row | anything below the widest row is real |
+| `V_base` | fills to the mat at constant radius | the fill is long |
+| `V_extrap` | continues each side to the mat along the slope it had where the edge was crisp | the edges are not straight that far |
+
+**`V_disk` and `V_extrap` decide.** They bracket the truth, and — the useful
+part — they *agree only when the mask already reached the mat*, which is
+precisely the condition under which the measurement can be trusted. Their
+spread is a real test, not a formality.
+
+## Confidences
+
+Each estimator carries a confidence, scored on evidence **independent of its own
+value**:
+
+```
+conf = (measured share) + (invented share) × (is the invention sound?)
+```
+
+so an estimator that invents nothing scores 1, and one that invents half its
+volume scores at most 0.5 + 0.5 × soundness. The inputs are mask-versus-mat
+geometry (how far short the mask stopped, whether the silhouette was still
+widening when it ended) and **held-out** edge-prediction error — the fit is
+scored on rows it never saw, over a window sized to match how far it has to
+reach. Scoring a fit on the points it was fitted to measures nothing, the way a
+template matched against a copy of itself always wins.
+
+Three places where the obvious design is wrong, each found by testing against a
+synthetic run with a known answer:
+
+- **Deciders are chosen once per run, not per frame.** A hard per-frame gate
+  puts one frame at 0.36 and its neighbour at 0.34 and gives them opposite
+  verdicts. Worse, it inverts the meaning: a frame whose `V_disk` is slightly
+  *better* clears the gate, meets `V_extrap`, disagrees with it and is thrown
+  out, while its neighbour with a worse `V_disk` never faces the comparison and
+  survives.
+- **Consensus weights are the run's median confidences, not each frame's.**
+  Per-frame weights drift over a run — as the bead shrinks, a mask that stops a
+  fixed 16 px short of the mat loses a growing *fraction* of it, so `V_disk`'s
+  confidence decays — the blend slides from one biased estimator toward
+  another, and that slide enters the strain as shrinkage that never happened.
+  Measured: per-frame weights gave **−10.05%** against a true **−11.199%**,
+  *worse than any of the four estimators alone*. Fixed weights gave −11.29%.
+- **A baseline inferred from the masks ("auto") cannot judge those same masks.**
+  That is circular, and a circular score reads high exactly when it deserves it
+  least, so it is capped — but the cap must sit clearly *above* the decision
+  gate, not on it. Set equal to it (both were 0.35) every greyscale run landed
+  exactly on the gate, confidences of 0.345/0.348/0.350 flipped frames between
+  SINGLE and REJECT on rounding noise, and a 4-frame set was thrown out whole
+  with masks that were in fact perfect. The cap is 0.65.
+
+## Verdicts and quarantine
+
+Per frame, from the spread between the deciders, relative to the consensus
+(volumes run to ~10⁸ px³, so an absolute tolerance would mean nothing):
+
+`CERTIFIED` ≤2% · `LIKELY` ≤5% · `CONFLICT` >5% · `SINGLE` one decider · `REJECT` none
+
+**What gets quarantined is not simply CONFLICT.** The strain is a ratio, so a
+bias that is the same in every frame divides out of it exactly: if `V_disk` and
+`V_extrap` disagree by 12% on all 24 frames, that is a statement about the
+absolute volume (the base is lost to shadow), not a reason to discard the run —
+discarding it would leave a biased subset and a strain measured over a shorter
+span, which is worse than the disagreement was. What *does* corrupt a strain is
+a frame that disagrees much more than the run normally does, or one whose mask
+is broken. So frames are quarantined on **outlier** disagreement (>3 MAD above
+the run's own median) or a broken mask, and the systematic part is reported as a
+caveat on the absolute volume.
+
+If quarantining shortens the span, the report says so — a strain quoted over
+frames 2→14 of a 24-frame run, without that being stated, is the exact kind of
+quiet wrongness this machinery exists to prevent.
+
+Brightness outliers (exposure glitch, a shadow crossing the frame) are flagged
+by MAD on each frame's mean brightness and their volumes interpolated from the
+neighbours.
+
+## Accuracy
+
+Against synthetic runs whose true disc-integral volume is known exactly
+(spherical cap on a blue mat, front-lit so the base fades, true linear strain
+−11.199%):
+
+| set | what it tests | verdicts | measured strain | error |
+|---|---|---|---|---|
+| `gt40` | clean, 40 frames | 40 CERTIFIED | −11.133% | +0.066 pts |
+| `gt_shadow` | deep shadow at the base | 24 CERTIFIED | −11.146% | +0.053 pts |
+| `gt_mixed` | 1-in-4 bad frames + 2 exposure glitches | 17 CERTIFIED, 5 LIKELY, 2 REJECT | −11.057% | +0.142 pts |
+| `gt_lost` | base genuinely below the threshold | 24 CONFLICT (all flagged) | −11.195% | +0.004 pts |
+| `gt40` tight crop | crop shifts Otsu, mask stops 16 px short | 40 CONFLICT | −11.292% | −0.093 pts |
+
+`gt_lost` is the one worth reading twice: `V_disk` is **−10.7%** and `V_extrap`
+**+2.0%** on every frame, the tool says CONFLICT on all 24 and explains why —
+and the strain still comes out right, because the bias is the same at both ends
+of the ratio.
+
+On the real-image set with an independent ground truth (`bluemat`): true strain
+−15.000%, measured **−14.902%**, which reproduces the notebook's own result.
+
+It also refuses when it should: on a set whose crop cuts the bead off at both
+sides, all three frames come back REJECT, no strain is reported, and the
+summary says the crop is the problem.
+
+## Settings
+
+Everything is a flag; nothing is baked in for one set of images.
+
+```
+--roi x0,x1,y0,y1     crop, same for every image (big speed win, and usually
+                      needed to keep other bright objects out)
+--scale 0.256         px per um. 0.256 = Olympus SZX16 at 1x, 3088 px wide
+--interval 30         seconds between frames; without it the x axis is frame number
+--time-regex '_(\d+)min'   or read the time out of the file name
+--baseline blue       read the mat off its own colour (default) | auto | a row number
+--thresh-offset -20   lower the threshold if the mask will not reach the mat
+--method otsu         otsu | adaptive | edges
+--workers 4           default: one per core
+--each                treat every subfolder of the given folder as its own experiment
+```
+
+## What this does not fix
+
+The base is lost to shadow because the bead is lit from the front, so its
+underside sits in its own shadow while the mat scatters light back. At the
+contact line the real images read bead 99, mat 83 — a 16-level difference where
+mid-height contrast is 226. No threshold separates that, and `V_extrap` is an
+estimate of what the threshold could not see.
+
+**A backlight removes the problem at source** rather than estimating around it.
+Everything above is what to do until then.
