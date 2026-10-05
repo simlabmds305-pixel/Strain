@@ -55,6 +55,37 @@ plt.rcParams.update({
 })
 
 
+def save_fig(fig, out):
+    """Render to a temp file on the local disk, then copy the finished file
+    into place.
+
+    matplotlib writes a PNG to its destination in many small writes.  Onto a
+    removable drive that is many chances to fail, and one did: a run died with
+    OSError 22 on the fifth of seven figures, in a folder where the previous
+    four had just saved.  Rendering locally and copying one complete file is a
+    single sequential write, and it also makes a half-written figure on the
+    drive impossible.  Falls back to writing straight to `out` if no temp file
+    can be made at all.
+    """
+    import shutil
+    import tempfile
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+    except Exception:
+        fig.savefig(out, bbox_inches="tight")
+        return
+    try:
+        fig.savefig(tmp, bbox_inches="tight")
+        shutil.copyfile(tmp, out)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def time_axis(df, info):
     """x values and their label: seconds, minutes or hours, whichever reads best.
 
@@ -170,7 +201,7 @@ def plot_vs_time(df, info, out, col, title, ylabel, headline="final  {v:+.2f}%",
     ax.legend(frameon=False, fontsize=9, loc="lower left", ncol=2,
               bbox_to_anchor=(0.0, -0.02))
     fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    save_fig(fig, out)
     plt.close(fig)
 
 
@@ -216,7 +247,7 @@ def plot_shape_strain(df, info, out):
                     fontweight="bold", color=INK)
     ax.legend(frameon=False, fontsize=9, loc="upper right")
     fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    save_fig(fig, out)
     plt.close(fig)
 
 
@@ -246,7 +277,7 @@ def plot_volumes(df, info, out):
     place_end_labels(ax, ends)
     ax.legend(frameon=False, fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    save_fig(fig, out)
     plt.close(fig)
 
 
@@ -276,7 +307,7 @@ def plot_agreement(df, info, out):
     ax.legend(frameon=False, fontsize=9, ncol=5, loc="upper center",
               bbox_to_anchor=(0.5, -0.22))
     fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    save_fig(fig, out)
     plt.close(fig)
 
 
