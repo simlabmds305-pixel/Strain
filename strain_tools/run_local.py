@@ -339,6 +339,74 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
     return df, info
 
 
+# ------------------------------------------------------------- interactive
+# Run with no folder and it asks, the way the cantilever app does: choose the
+# folder, confirm the interval, drag the crop.  The answers are remembered in
+# app_settings.json beside this script so the next run starts where this one
+# left off.
+SETTINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    try:
+        with open(SETTINGS, "w") as f:
+            json.dump(d, f, indent=2)
+    except Exception:
+        pass            # a read-only folder must not take the run down with it
+
+
+def _tk_root():
+    import tkinter as tk
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)      # else the dialog hides behind the console
+    return root
+
+
+def choose_folder(start=None):
+    """Folder picker.  Returns the path, or None if cancelled."""
+    from tkinter import filedialog
+    root = _tk_root()
+    d = filedialog.askdirectory(
+        title="Choose the folder of bead images",
+        initialdir=start if start and os.path.isdir(start) else os.path.expanduser("~"),
+        mustexist=True)
+    root.destroy()
+    return d or None
+
+
+def ask_interval(default=60.0):
+    """Seconds between frames.  Returns a float, or None for 'use image number'."""
+    from tkinter import simpledialog
+    root = _tk_root()
+    v = simpledialog.askfloat(
+        "Time between images",
+        "Seconds between frames.\n\n"
+        "Cancel = plot against image number instead of time.",
+        initialvalue=default, minvalue=0.0, parent=root)
+    root.destroy()
+    return v
+
+
+def looks_like_parent(folder, pattern="*"):
+    """True when the folder holds no images itself but its subfolders do."""
+    if bp.list_frames(folder, pattern):
+        return False
+    try:
+        subs = [d.path for d in os.scandir(folder) if d.is_dir() and d.name != "analysis"]
+    except OSError:
+        return False
+    return any(bp.list_frames(sd, pattern) for sd in subs)
+
+
 def parse_roi(s):
     if not s:
         return None
@@ -351,7 +419,9 @@ def parse_roi(s):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Measure bead volume and shrinkage strain from side-view images.")
-    ap.add_argument("folder", help="folder of images (or a parent, with --each)")
+    ap.add_argument("folder", nargs="?", default=None,
+                    help="folder of images (or a parent, with --each). "
+                         "Leave it out and you will be asked.")
     ap.add_argument("--each", action="store_true",
                     help="treat every immediate subfolder as its own experiment")
     ap.add_argument("--pattern", default="*", help="file pattern, e.g. '*.tif'")
@@ -379,6 +449,29 @@ def main(argv=None):
                     help="drag the crop on the first image, then run with it")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
+    cfgsave = load_settings()
+
+    # ---- no folder given: ask for everything, like the cantilever app ----
+    interactive = a.folder is None
+    if interactive:
+        try:
+            a.folder = choose_folder(cfgsave.get("last_dir"))
+        except Exception as e:
+            raise SystemExit(f"could not open the folder picker ({e}).\n"
+                             f"Pass the folder on the command line instead:\n"
+                             f'  python run_local.py "C:\\path\\to\\images" --interval 60')
+        if not a.folder:
+            raise SystemExit("no folder chosen")
+        print(f"folder: {a.folder}")
+        if a.interval is None and not a.time_regex:
+            a.interval = ask_interval(cfgsave.get("interval", 60.0))
+            print(f"interval: {a.interval} s" if a.interval else
+                  "interval: none - plotting against image number")
+        if not a.each and looks_like_parent(a.folder, a.pattern):
+            a.each = True
+            print("no images here but the subfolders have some - treating each as its "
+                  "own experiment")
+        a.pick_roi = a.pick_roi or a.roi is None
 
     baseline = a.baseline
     if baseline not in ("blue", "auto"):
@@ -399,13 +492,17 @@ def main(argv=None):
                           if d.is_dir() and d.name != "analysis")
             if subs:
                 first = subs[0]
-        roi = pick_roi.pick_for_folder(first, a.pattern, cfg["ROI"])
+        seed = cfg["ROI"] or (tuple(cfgsave["roi"]) if cfgsave.get("roi") else None)
+        roi = pick_roi.pick_for_folder(first, a.pattern, seed)
         if roi:
             cfg["ROI"] = roi
             print(f"using --roi {roi[0]},{roi[1]},{roi[2]},{roi[3]}  "
                   f"(save that flag to skip the picker next time)")
         else:
             print("no box drawn - using the whole frame")
+
+    save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
+                       roi=list(cfg["ROI"]) if cfg["ROI"] else None))
 
     if a.each:
         subs = sorted(d.path for d in os.scandir(a.folder)

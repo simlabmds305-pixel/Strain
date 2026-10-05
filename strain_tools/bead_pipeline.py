@@ -313,7 +313,18 @@ def _measure_one(path, cfg, want_mask=False):
     x0, x1 = max(0, int(x0)), min(W, int(x1))
     y0, y1 = max(0, int(y0)), min(H, int(y1))
     if x1 - x0 < 2 or y1 - y0 < 2:
-        raise ValueError(f"ROI {roi} does not overlap the image ({W}x{H})")
+        raise ValueError(f"the crop {tuple(roi)} does not overlap this {W}x{H} image at all")
+    if roi:
+        # A crop picked on one set and reused on another of a different size is
+        # the usual cause, and "every image failed to segment" says nothing
+        # about it.  Name the real problem.
+        want = (int(roi[1]) - int(roi[0])) * (int(roi[3]) - int(roi[2]))
+        if want > 0 and (x1 - x0) * (y1 - y0) < 0.7 * want:
+            raise ValueError(
+                f"the crop {tuple(roi)} mostly falls outside this {W}x{H} image - only "
+                f"{x1 - x0}x{y1 - y0} px of it land on the frame. These images are a "
+                f"different size from the ones the crop was picked on, so pick a crop "
+                f"for this set (run it on its own with --pick-roi)")
 
     crop = bgr[y0:y1, x0:x1]
     img = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -747,7 +758,11 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     failures = [(f["path"], f["error"]) for f in frames if not f["ok"]]
     good = [f for f in frames if f["ok"]]
     if not good:
-        raise RuntimeError("every image failed to segment - check ROI / INVERT / threshold")
+        # Pass the first real reason up: "every image failed" on its own sends
+        # you looking at the threshold when the crop is what is wrong.
+        why = failures[0][1] if failures else "no reason recorded"
+        raise RuntimeError(f"every image failed. First one ({os.path.basename(failures[0][0])}) "
+                           f"says: {why}" if failures else "every image failed")
 
     # ---- stage 2: one mat row for the set ----------------------------------
     y_base, src, base_conf, notes = resolve_baseline(good, cfg)

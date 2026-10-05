@@ -9,6 +9,7 @@ The notebook (`../bead_volume_batch_multi_image.ipynb`) is unchanged and still
 works. This is the same physics, restructured.
 
 ```
+python run_local.py                                 # asks: folder, interval, crop
 python run_local.py /path/to/set --pick-roi --interval 30
 python run_local.py /path/to/set --roi 1050,1950,1350,1720 --interval 30
 python run_local.py /path/to/parent --each          # every subfolder, in one go
@@ -35,9 +36,17 @@ Check it works on anything you have:
 python run_local.py "C:/path/to/a/set" --pick-roi --interval 30
 ```
 
+Or run it with no arguments at all and it asks — folder picker, then the
+interval, then the crop — remembering all three in `app_settings.json` beside
+the script so the next run starts where the last one left off. If the folder
+you choose has no images but its subfolders do, it treats each subfolder as
+its own experiment without being told.
+
 `--pick-roi` opens the first image; drag a box round the bead, close the
 window, and it runs with that crop and prints the flag so you can skip the
-picker next time. Quote Windows paths — they contain backslashes and often
+picker next time. One crop is shared across a `--each` run, so sets framed
+differently need to be run separately — if the crop does not fit, the error
+says so and names both sizes. Quote Windows paths — they contain backslashes and often
 spaces. Results appear in `<that folder>/analysis/`.
 
 Two platform notes:
