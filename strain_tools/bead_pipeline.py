@@ -960,17 +960,29 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # threshold separates those, radial_strain_pct stays on the widest row,
     # which degrades gently, and radial_contact_pct carries the contact line
     # for the frames where it can be measured at all.
-    ac0 = float(df.loc[ref, "a_contact_px"])
     df["radial_strain_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
-    df["radial_contact_pct"] = (100.0 * (df["a_contact_px"] / ac0 - 1.0)
-                                if np.isfinite(ac0) and ac0 else np.nan)
+
+    # The contact strain is referred to the first frame that HAS a contact
+    # radius, which is not always the run's reference frame: on a real set the
+    # very first image came in at base_taper 0.9747 against a 0.98 floor, so
+    # ac0 was NaN and took the whole column with it -- 34 frames with a
+    # perfectly good base reported nothing at all.
+    ac_first = df["a_contact_px"].first_valid_index()
+    if ac_first is not None and float(df.loc[ac_first, "a_contact_px"]):
+        ac0 = float(df.loc[ac_first, "a_contact_px"])
+        df["radial_contact_pct"] = 100.0 * (df["a_contact_px"] / ac0 - 1.0)
+    else:
+        ac_first = None
+        df["radial_contact_pct"] = np.nan
     if scale:
         df["a_contact_um"] = df["a_contact_px"] / scale
 
     info = dict(cfg=cfg, baseline_y=y_base, baseline_source=src,
                 baseline_conf=base_conf, baseline_notes=notes,
                 failures=failures, n_input=len(paths), n_ok=len(good),
-                reference_row=int(ref), V0_px3=V0,
+                reference_row=int(ref),
+                contact_ref_row=(int(ac_first) if ac_first is not None else None),
+                V0_px3=V0,
                 V0_mm3=(V0 / scale ** 3 / 1e9 if scale else np.nan),
                 trust=TRUST_METHODS, deciders=deciders, med_conf=med_conf,
                 reject_below=reject_below, workers=workers)
