@@ -581,6 +581,9 @@ def main(argv=None):
                     help="parallel worker processes (default: one per core)")
     ap.add_argument("--pick-roi", action="store_true",
                     help="drag the crop on the first image, then run with it")
+    ap.add_argument("--one-roi", action="store_true",
+                    help="with --each, draw ONE crop and use it for every subfolder "
+                         "(default: you are asked for each, since the bead moves)")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     cfgsave = load_settings()
@@ -615,48 +618,65 @@ def main(argv=None):
                CLIP_AT_BASELINE=not a.no_clip, INTERVAL_S=a.interval,
                TIME_REGEX=a.time_regex)
 
-    if a.pick_roi:
+    def ask_roi(folder, seed=None):
+        """Draw the crop for one folder, falling back to a typed one."""
         import pick_roi
-        first = a.folder
-        if a.each:                      # pick on the first image of the first subfolder
-            subs = sorted(d.path for d in os.scandir(a.folder)
-                          if d.is_dir() and d.name != "analysis")
-            if subs:
-                first = subs[0]
-        seed = cfg["ROI"] or (tuple(cfgsave["roi"]) if cfgsave.get("roi") else None)
-        print("  opening the first image to draw the crop on - again, check the "
-              "taskbar if you cannot see it", flush=True)
+        print(f"  opening the first image of {os.path.basename(folder)} to draw the "
+              f"crop on - check the taskbar if you cannot see it", flush=True)
         try:
-            roi = pick_roi.pick_for_folder(first, a.pattern, seed)
+            roi = pick_roi.pick_for_folder(folder, a.pattern, seed)
         except Exception as e:
             print(f"  the crop picker could not open ({e})")
             raw = _ask_console("  type the crop as x0,x1,y0,y1, or Enter for the "
                                "whole frame:\n  roi> ")
             roi = parse_roi(raw) if raw else None
         if roi:
-            cfg["ROI"] = roi
-            print(f"using --roi {roi[0]},{roi[1]},{roi[2]},{roi[3]}  "
-                  f"(save that flag to skip the picker next time)")
+            print(f"  using --roi {roi[0]},{roi[1]},{roi[2]},{roi[3]}")
         else:
-            print("no box drawn - using the whole frame")
-
-    save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
-                       roi=list(cfg["ROI"]) if cfg["ROI"] else None))
+            print("  no box drawn - using the whole frame")
+        return roi
 
     if a.each:
         subs = sorted(d.path for d in os.scandir(a.folder)
                       if d.is_dir() and d.name != "analysis")
         if not subs:
             raise SystemExit(f"no subfolders in {a.folder}")
-        for s in subs:
-            print(f"\n######  {os.path.basename(s)}")
+
+        # One crop per experiment, because the bead is not in the same place in
+        # every set -- a crop carried over from the previous folder would be
+        # wrong by however far the sample moved, and wrong quietly: it would
+        # clip the bead rather than fail.  --one-roi is for a campaign that
+        # really was framed identically throughout.
+        per_folder = a.pick_roi and not a.one_roi and cfg["ROI"] is None
+        shared = cfg["ROI"]
+        if a.pick_roi and not per_folder and shared is None:
+            shared = ask_roi(subs[0], cfgsave.get("roi") and tuple(cfgsave["roi"]))
+        if per_folder:
+            print(f"\n{len(subs)} experiment(s) - you will be asked for a crop on each "
+                  f"one in turn (pass --one-roi to draw it once for all of them)")
+
+        save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval))
+        for sub in subs:
+            print(f"\n######  {os.path.basename(sub)}")
+            cfg_sub = dict(cfg)
+            if per_folder:
+                # no seed from the previous folder: the bead has moved, and a
+                # box already drawn around where it used to be invites OK
+                cfg_sub["ROI"] = ask_roi(sub)
+            elif shared is not None:
+                cfg_sub["ROI"] = shared
             try:
-                run_folder(s, cfg, a.pattern, a.workers, a.quiet)
+                run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet)
             except SystemExit as e:
                 print(f"  skipped: {e}")
             except Exception as e:
                 print(f"  FAILED: {type(e).__name__}: {e}")
     else:
+        if a.pick_roi and cfg["ROI"] is None:
+            seed = cfgsave.get("roi") and tuple(cfgsave["roi"])
+            cfg["ROI"] = ask_roi(a.folder, seed)
+        save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
+                           roi=list(cfg["ROI"]) if cfg["ROI"] else None))
         run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet)
 
 

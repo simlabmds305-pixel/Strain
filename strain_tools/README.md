@@ -44,9 +44,15 @@ its own experiment without being told.
 
 `--pick-roi` opens the first image; drag a box round the bead, close the
 window, and it runs with that crop and prints the flag so you can skip the
-picker next time. One crop is shared across a `--each` run, so sets framed
-differently need to be run separately — if the crop does not fit, the error
-says so and names both sizes. Quote Windows paths — they contain backslashes and often
+picker next time.
+
+Under `--each` you are asked for **a crop per experiment**, because the bead
+is not in the same place in every set and a crop carried over from the
+previous folder would be wrong by however far the sample moved — and wrong
+quietly, clipping the bead rather than failing. Each folder's own crop is
+written to its `analysis/settings.json`. Pass `--one-roi` to draw it once for
+all of them when a campaign really was framed identically, or `--roi` to give
+the same box on the command line. Quote Windows paths — they contain backslashes and often
 spaces. Results appear in `<that folder>/analysis/`.
 
 Two platform notes:
@@ -262,6 +268,8 @@ Everything is a flag; nothing is baked in for one set of images.
 --method otsu         otsu | adaptive | edges
 --workers 4           default: one per core
 --each                treat every subfolder of the given folder as its own experiment
+                      (asks for a crop on each one)
+--one-roi             with --each, draw one crop and use it for every subfolder
 ```
 
 ## What this does not fix
