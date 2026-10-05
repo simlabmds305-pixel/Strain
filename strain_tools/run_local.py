@@ -408,40 +408,60 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
     cols = [c for c in cols if c in df.columns]
     df[cols].to_csv(os.path.join(outdir, "per_image.csv"), index=False)
 
-    um = "h_um" in df.columns
-    plot_vs_time(df, info, os.path.join(outdir, "linear_strain.png"),
-                 "linear_strain_pct", "Linear shrinkage strain of the bead",
-                 "linear strain (%)")
-    plot_vs_time(df, info, os.path.join(outdir, "volumetric_strain.png"),
-                 "vol_strain_pct", "Volumetric strain of the bead",
-                 "volumetric strain (%)", colour=SERIES["V_extrap"])
-    plot_vs_time(df, info, os.path.join(outdir, "height.png"),
-                 "h_um" if um else "h_px", "Bead height",
-                 "height (um)" if um else "height (px)",
-                 headline="final  {v:,.0f}", colour=SERIES["V_disk"],
-                 zero_line=False)
-    plot_vs_time(df, info, os.path.join(outdir, "base_radius.png"),
-                 "a_um" if um else "a_px", "Bead base radius",
-                 "base radius (um)" if um else "base radius (px)",
-                 headline="final  {v:,.0f}", colour=SERIES["V_extrap"],
-                 zero_line=False)
-    plot_shape_strain(df, info, os.path.join(outdir, "shape_strain.png"))
-    plot_volumes(df, info, os.path.join(outdir, "volumes.png"))
-    plot_agreement(df, info, os.path.join(outdir, "agreement.png"))
-
+    # The numbers go out BEFORE the pictures.  A figure that will not save --
+    # a removable drive hiccuping mid-run is enough -- used to take summary.txt
+    # down with it and leave a run with no readable result at all.
     report = write_report(df, info, outdir)
+    timing = (f"\n  run time  {secs:.1f} s for {info['n_ok']} images "
+              f"({secs / max(1, info['n_ok']) * 1000:.0f} ms each, "
+              f"{info['workers']} workers)\n")
     with open(os.path.join(outdir, "summary.txt"), "w") as f:
-        f.write(report + f"\n  run time  {secs:.1f} s for {info['n_ok']} images "
-                         f"({secs/max(1,info['n_ok'])*1000:.0f} ms each, "
-                         f"{info['workers']} workers)\n")
+        f.write(report + timing)
+
+    um = "h_um" in df.columns
+    plots = [
+        ("linear_strain.png", lambda o: plot_vs_time(
+            df, info, o, "linear_strain_pct", "Linear shrinkage strain of the bead",
+            "linear strain (%)")),
+        ("volumetric_strain.png", lambda o: plot_vs_time(
+            df, info, o, "vol_strain_pct", "Volumetric strain of the bead",
+            "volumetric strain (%)", colour=SERIES["V_extrap"])),
+        ("height.png", lambda o: plot_vs_time(
+            df, info, o, "h_um" if um else "h_px", "Bead height",
+            "height (um)" if um else "height (px)",
+            headline="final  {v:,.0f}", colour=SERIES["V_disk"], zero_line=False)),
+        ("base_radius.png", lambda o: plot_vs_time(
+            df, info, o, "a_um" if um else "a_px", "Bead base radius",
+            "base radius (um)" if um else "base radius (px)",
+            headline="final  {v:,.0f}", colour=SERIES["V_extrap"], zero_line=False)),
+        ("shape_strain.png", lambda o: plot_shape_strain(df, info, o)),
+        ("volumes.png", lambda o: plot_volumes(df, info, o)),
+        ("agreement.png", lambda o: plot_agreement(df, info, o)),
+    ]
+    failed = []
+    for name, draw in plots:
+        try:
+            draw(os.path.join(outdir, name))
+        except Exception as e:                  # one bad figure, not a lost run
+            failed.append(f"{name}: {type(e).__name__}: {e}")
+            plt.close("all")
+    if failed:
+        msg = ("\n  PLOTS THAT WOULD NOT SAVE (the numbers above are unaffected):\n"
+               + "\n".join("    - " + f for f in failed)
+               + "\n    An OSError here is usually the drive, not the data. Copy the\n"
+                 "    folder to a local disk and re-run; results are written next to\n"
+                 "    the images, and a removable drive can refuse a write mid-run.\n")
+        with open(os.path.join(outdir, "summary.txt"), "a") as f:
+            f.write(msg)
+        if not quiet:
+            print(msg)
+
     with open(os.path.join(outdir, "settings.json"), "w") as f:
         json.dump({k: (list(v) if isinstance(v, tuple) else v)
                    for k, v in info["cfg"].items()}, f, indent=2)
 
     if not quiet:
-        print(report)
-        print(f"  run time  {secs:.1f} s for {info['n_ok']} images "
-              f"({secs/max(1,info['n_ok'])*1000:.0f} ms each, {info['workers']} workers)")
+        print(report + timing)
     return df, info
 
 
