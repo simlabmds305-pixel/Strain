@@ -88,6 +88,8 @@ LIKELY_TOL = 0.05    # within 5%                     -> LIKELY
 
 # Calibration of the confidence scores (all in units of the bead's own height,
 # so they hold for any bead size or magnification).
+BASE_TAPER_MIN = 0.80   # below this the silhouette has no usable base, so its
+                        # contact radius means nothing -- see base_lost
 GAP_FULL = 0.15      # mask ending this far from the mat scores V_disk zero
 TAPER_FULL = 0.25    # base narrowed to (1 - this) of the widest row scores zero
 TRUNC_FULL = 0.03    # V_trunc discarding this share of the volume scores it zero
@@ -594,7 +596,21 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     above = Y <= y_base_eff + 0.5
     w_t = w[above] if above.any() else w
     k = int(min(5, len(w_t)))
-    m["base_taper"] = float(np.median(w_t[-k:]) / w.max()) if w.max() else np.nan
+    w_contact = float(np.median(w_t[-k:]))
+    m["base_taper"] = float(w_contact / w.max()) if w.max() else np.nan
+
+    # The CONTACT radius -- the half-width where the bead meets the mat -- as
+    # distinct from a_px, which is the half-width of the WIDEST row.  For a
+    # bead that wets the mat those are the same row and the distinction is
+    # idle.  For one that beads up they are not: a real bead measured here was
+    # widest 97 px ABOVE the mat at the start and at the mat by the end, so a
+    # "radial strain" built from a_px compared a bulge radius against a
+    # contact radius -- two different lengths -- and read -7.5% where the
+    # contact line had actually moved -5.3%.  The contact line is the thing
+    # that pins, recedes and holds the material in tension, so the radial
+    # strain is measured from this one.
+    m["a_contact_px"] = w_contact / 2.0
+    m["base_lost"] = bool(m["base_taper"] < BASE_TAPER_MIN)
 
     # constant-radius fill from the widest row down to the mat
     m["V_base"] = m["V_trunc"] + float(np.pi * (w[i_w] / 2.0) ** 2 * fill)
@@ -919,7 +935,11 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     h0 = float(df.loc[ref, "h_px"])
     a0 = float(df.loc[ref, "a_px"])
     df["height_strain_pct"] = 100.0 * (df["h_px"] / h0 - 1.0) if h0 else np.nan
-    df["radial_strain_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
+    ac0 = float(df.loc[ref, "a_contact_px"])
+    df["radial_strain_pct"] = 100.0 * (df["a_contact_px"] / ac0 - 1.0) if ac0 else np.nan
+    df["radial_widest_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
+    if scale:
+        df["a_contact_um"] = df["a_contact_px"] / scale
 
     info = dict(cfg=cfg, baseline_y=y_base, baseline_source=src,
                 baseline_conf=base_conf, baseline_notes=notes,
@@ -1035,6 +1055,24 @@ def warnings_for(df, info):
                    f"of the bead, so V_disk is an underestimate by more than the row count "
                    f"suggests. A backlight removes this entirely; failing that, lower "
                    f"--thresh-offset until the mask reaches the contact line.")
+
+    if "base_lost" in df.columns and df["base_lost"].any():
+        n_lost = int(df["base_lost"].sum())
+        out.append(f"{n_lost} of {n} frame(s) have no usable base (base_taper below "
+                   f"{BASE_TAPER_MIN}; worst {df['base_taper'].min():.3f}). The radial "
+                   f"strain on those frames is not a measurement of the contact line. "
+                   f"Note that the two estimators can still AGREE there -- they share "
+                   f"everything above the widest row, so losing the base moves neither "
+                   f"much and the verdict does not see it. base_taper does; read that "
+                   f"column before trusting a radial number.")
+
+    if "a_contact_px" in df.columns and "a_px" in df.columns:
+        gap = (df["a_px"] - df["a_contact_px"]) / df["a_px"].replace(0, np.nan)
+        if float(gap.iloc[0]) > 0.02:
+            out.append(f"at the start this bead is widest {float(gap.iloc[0])*100:.0f}% above "
+                       f"its contact radius, i.e. it BULGES -- its contact angle is over 90 "
+                       f"degrees and the widest row is not the base. a_px tracks the bulge, "
+                       f"a_contact_px the contact line; the radial strain uses the latter.")
 
     ywide = df["Y_widest_full"].to_numpy(float)
     if n > 2 and np.ptp(ywide) > 20:
