@@ -79,6 +79,11 @@ MIN_CONF = 0.35
 FRAME_REJECT_FRAC = 0.5      # of the run's median best-decider confidence
 FRAME_REJECT_ABS = 0.10
 
+# A frame this far from the run's typical brightness is grossly wrong whatever
+# its neighbours look like.  Generous on purpose: illumination drifting by a
+# quarter over a long run is normal and must not trip it.
+GROSS_BRIGHT_FRAC = 0.50
+
 # Agreement tolerances, as a FRACTION of the consensus volume.  Volumes run to
 # ~1e8 px^3 and shrink by tens of percent over a run, so an absolute tolerance
 # in px^3 would mean nothing; relative is the only scale that holds across
@@ -798,6 +803,47 @@ def verdict_text(row):
 
 
 # ------------------------------------------------------ STAGE 4: the whole set
+def find_frozen(df, cols=("V_disk", "V_extrap"), min_run=3):
+    """Runs of EXACTLY equal values in a series that physically cannot repeat.
+
+    A volume is a float sum over tens of thousands of pixels; two frames of a
+    drying bead do not produce the same one twice, let alone to the last bit.
+    An exact repeat therefore means a value was copied rather than measured,
+    and this is the check that says so out loud.
+
+    It exists because a real run reported 34 consecutive frames identical to
+    nine decimal places -- volume, height and radius all frozen -- and every
+    other check passed them: the estimators agreed with each other (they were
+    copies of the same frame), the verdicts came out CERTIFIED, and the plots
+    showed a clean flat line that read as a bead sitting still. Nothing in a
+    system that cross-checks estimates against each other can catch data that
+    was duplicated before the estimates were made. Only this can.
+
+    Returns a list of (column, start_index, length).
+    """
+    out = []
+    for c in cols:
+        if c not in df.columns:
+            continue
+        v = df[c].to_numpy(float)
+        if v.size < min_run:
+            continue
+        same = np.r_[False, v[1:] == v[:-1]]          # exact equality, deliberately
+        i = 0
+        while i < same.size:
+            if same[i]:
+                j = i
+                while j < same.size and same[j]:
+                    j += 1
+                run = j - i + 1                        # the run includes its first value
+                if run >= min_run:
+                    out.append((c, i - 1, run))
+                i = j
+            else:
+                i += 1
+    return out
+
+
 def mark_brightness_outliers(df, z=2.5):
     """Flag frames whose brightness jumps away from their NEIGHBOURS, and fill
     those frames in from either side, so one exposure glitch cannot spike the
@@ -834,7 +880,17 @@ def mark_brightness_outliers(df, z=2.5):
     # becomes a huge number of MADs -- flagging the first and last few frames
     # of a run that has nothing wrong with it.
     mad = max(mad, 0.01 * max(1.0, abs(float(np.median(b)))))
-    bad = np.abs(resid - centre) > z * mad
+    spike = np.abs(resid - centre) > z * mad
+
+    # A local test alone has its own blind spot, equal and opposite to the
+    # global one: a BLOCK of bad frames long enough to fill the window drags
+    # the local median with it and none of them is flagged -- ten saturated
+    # frames at the start of a run slide through. So also flag anything
+    # grossly away from the run's own level. A drifting lamp stays well inside
+    # this (66.6 against a median of 54 is 23%); a frame at 200 does not.
+    level = max(1.0, abs(float(np.median(b))))
+    gross = np.abs(b - np.median(b)) > GROSS_BRIGHT_FRAC * level
+    bad = spike | gross
 
     df = df.copy()
     df["outlier"] = bad
@@ -847,6 +903,8 @@ def mark_brightness_outliers(df, z=2.5):
                 if col in df.columns:
                     df.loc[df.index[inside], col] = np.interp(
                         inside, gi, df[col].to_numpy(float)[gi])
+            if "measured" in df.columns:
+                df.loc[df.index[inside], "measured"] = False
     return df
 
 
@@ -915,6 +973,11 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     df = pd.DataFrame(rows)
 
     # ---- stage 4: outliers, quarantine, strain -----------------------------
+    # Before anything can substitute a value: were any of these measured twice
+    # over?  Checked on the raw numbers, because the filling below legitimately
+    # creates repeats and would mask the thing this is looking for.
+    frozen = find_frozen(df)
+    df["measured"] = True
     df = mark_brightness_outliers(df, cfg["OUTLIER_Z"])
 
     # ---- quarantine --------------------------------------------------------
@@ -1018,6 +1081,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
                 contact_ref_row=(int(ac_first) if ac_first is not None else None),
                 V0_px3=V0,
                 V0_mm3=(V0 / scale ** 3 / 1e9 if scale else np.nan),
+                frozen=frozen,
                 trust=TRUST_METHODS, deciders=deciders, med_conf=med_conf,
                 reject_below=reject_below, workers=workers)
     return df, info
@@ -1040,6 +1104,23 @@ def warnings_for(df, info):
     out = []
     cfg = info["cfg"]
     n = len(df)
+
+    for col, start, run in info.get("frozen", []):
+        out.append(
+            f"DO NOT USE THIS RUN AS IT STANDS. {run} consecutive frames "
+            f"(from {df['image'].iloc[start]}) have an identical {col}, to the "
+            f"last decimal. A volume is a sum over tens of thousands of pixels; "
+            f"two frames of a drying bead never produce the same one twice. "
+            f"Either those image files are duplicates of each other, or the "
+            f"camera did not advance. Check the images themselves before "
+            f"reading anything here -- and note that the frames either side of "
+            f"the run are fine, so the fault is in the data, not the tool.")
+
+    if "measured" in df.columns and (~df["measured"]).any():
+        k = int((~df["measured"]).sum())
+        out.append(f"{k} frame(s) had their volumes filled in from the neighbours "
+                   f"after an exposure glitch; the `measured` column marks them. "
+                   f"They are estimates, not measurements.")
 
     # A trusted estimator that was dropped for the whole run is the most
     # important thing on this list: it means nothing corroborated the answer.

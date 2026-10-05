@@ -227,6 +227,41 @@ does not invent anisotropy. On one built with a pinned base — true vertical
 −15.00%, true radial −6.00% — it reads −15.52% and −6.46%, both within half a
 point, and the warning fires.
 
+## Checks and tests
+
+`python test_pipeline.py` runs the regression suite. Every test in it is a bug
+that reached a real run and produced a wrong number that looked right, written
+as the failure rather than the fix. Point it at a folder with a known answer
+to include the end-to-end check:
+
+```bash
+BEAD_GT_DIR=/path/to/known/set python test_pipeline.py
+```
+
+Two mistakes account for most of that list and are worth naming, because they
+are easy to make again:
+
+- **Judging a per-frame quantity against the whole run.** Everything drifts —
+  the lamp dims, the base goes into shadow, the bead shrinks — so a global
+  median plus MAD does not find outliers, it finds the *ends of the run*. On
+  one 99-frame set it called the whole bright first half-hour outliers. Compare
+  a frame with its neighbours. But a purely local test has the opposite blind
+  spot: a long enough *block* of bad frames drags the local median with it, so
+  there is also a gross check against the run's own level.
+- **Writing a value that was not measured.** Interpolation, clamping and
+  fallbacks put numbers in the table that no image produced, and afterwards
+  they look exactly like the real ones. `np.interp` clamping past the end of
+  its range once handed 34 frames a copy of frame 34 — a perfectly flat
+  half-hour that read as a bead sitting still, and became V₀.
+
+`find_frozen` is the guard for the second. It looks for runs of *exactly*
+equal volumes, which a sum over tens of thousands of pixels cannot produce
+twice, and refuses the run out loud when it finds them. Nothing else could:
+the estimators agreed with each other (they were copies of the same frame),
+every verdict came out CERTIFIED, and the plots looked clean. Cross-checking
+estimates against each other cannot catch data duplicated before the estimates
+were made. The `measured` column marks any frame whose volume was filled in.
+
 ## Accuracy
 
 Against synthetic runs whose true disc-integral volume is known exactly
