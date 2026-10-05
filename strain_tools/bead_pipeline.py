@@ -799,20 +799,54 @@ def verdict_text(row):
 
 # ------------------------------------------------------ STAGE 4: the whole set
 def mark_brightness_outliers(df, z=2.5):
-    """Flag frames whose mean brightness is a sudden outlier and interpolate their
-    volumes from the neighbours, so one exposure glitch cannot spike the curve."""
+    """Flag frames whose brightness jumps away from their NEIGHBOURS, and fill
+    those frames in from either side, so one exposure glitch cannot spike the
+    curve.
+
+    Two things here are not the obvious implementation, and both were learned
+    the expensive way on a real 99-frame run.
+
+    Against a LOCAL median, not the run's.  Illumination drifts over a long
+    dry-down -- 66.6 to 52.5 on that run -- and a global MAD then calls the
+    whole bright START an outlier: 34 consecutive frames flagged, which is not
+    what the word means.  A rolling median tracks the drift and flags only
+    what jumps away from its own neighbourhood.
+
+    And only frames BETWEEN good ones are filled.  np.interp clamps outside
+    the range it is given, so with frames 0-33 flagged every one of them was
+    handed frame 34's value -- identical to nine decimal places, a perfectly
+    flat half-hour that looked like a bead sitting still and quietly became
+    V0.  A frame with no good neighbour on one side keeps what was measured.
+    """
+    import pandas as pd
     b = df["brightness"].to_numpy(float)
-    med = np.median(b)
-    mad = np.median(np.abs(b - med)) + 1e-9
-    bad = np.abs(b - med) > z * 1.4826 * mad
+    n = len(b)
+    if n >= 5:
+        local = pd.Series(b).rolling(9, center=True, min_periods=3).median().to_numpy()
+    else:
+        local = np.full(n, np.median(b))
+    resid = b - local
+    centre = np.median(resid)
+    mad = np.median(np.abs(resid - centre)) * 1.4826
+    # Floor the scale at 1% of the frame's own brightness.  Without it a very
+    # smooth illumination ramp drives the interior residuals to zero, the MAD
+    # collapses with them, and the rounding at the ends of the rolling window
+    # becomes a huge number of MADs -- flagging the first and last few frames
+    # of a run that has nothing wrong with it.
+    mad = max(mad, 0.01 * max(1.0, abs(float(np.median(b)))))
+    bad = np.abs(resid - centre) > z * mad
+
     df = df.copy()
     df["outlier"] = bad
-    if bad.any() and (~bad).sum() >= 2:
-        gi = np.flatnonzero(~bad)
+    gi = np.flatnonzero(~bad)
+    if bad.any() and gi.size >= 2:
         bi = np.flatnonzero(bad)
-        for col in list(METHODS) + ["V_consensus", "h_px", "a_px"]:
-            if col in df.columns:
-                df.loc[df.index[bi], col] = np.interp(bi, gi, df[col].to_numpy(float)[gi])
+        inside = bi[(bi > gi.min()) & (bi < gi.max())]   # never extrapolate
+        if inside.size:
+            for col in list(METHODS) + ["V_consensus", "h_px", "a_px"]:
+                if col in df.columns:
+                    df.loc[df.index[inside], col] = np.interp(
+                        inside, gi, df[col].to_numpy(float)[gi])
     return df
 
 
