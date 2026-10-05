@@ -339,12 +339,15 @@ def write_report(df, info, outdir):
                          f"{u['contact_angle_deg'].iloc[0]:.0f} -> "
                          f"{u['contact_angle_deg'].iloc[-1]:.0f} deg")
             L.append(f"      radial          {er:+.2f} %   "
-                     f"contact r {u['a_contact_um'].iloc[0]:,.0f} -> "
-                     f"{u['a_contact_um'].iloc[-1]:,.0f} um"
-                     if "a_contact_um" in u.columns else f"      radial          {er:+.2f} %")
-            if "radial_widest_pct" in u.columns:
-                L.append(f"      (widest row     {u['radial_widest_pct'].iloc[-1]:+.2f} %   "
-                         f"max r {u['a_um'].iloc[0]:,.0f} -> {u['a_um'].iloc[-1]:,.0f} um)")
+                     f"widest r {u['a_um'].iloc[0]:,.0f} -> {u['a_um'].iloc[-1]:,.0f} um"
+                     if "a_um" in u.columns else f"      radial          {er:+.2f} %")
+            if "radial_contact_pct" in u.columns:
+                cp = u["radial_contact_pct"].dropna()
+                if len(cp) > 1:
+                    good = u.loc[cp.index]
+                    L.append(f"      contact line    {cp.iloc[-1]:+.2f} %   "
+                             f"over the {len(cp)} frame(s) with a measurable base "
+                             f"({good['image'].iloc[0]} -> {good['image'].iloc[-1]})")
             if abs(er) > 1e-9 and ez / er > 1.25:
                 L.append(f"      -> this bead shrinks {ez/er:.1f}x more vertically than it does")
                 L.append( "         radially, so the linear strain above is a geometric mean")
@@ -396,7 +399,7 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
                if f"{k}{s}" in df.columns]
             + [f"conf_{k}" for k in bp.METHODS]
             + ["h_px", "a_px", "a_contact_px", "h_um", "a_um", "a_contact_um",
-               "base_lost", "radial_widest_pct", "aspect_h_over_a", "contact_angle_deg",
+               "base_lost", "radial_contact_pct", "aspect_h_over_a", "contact_angle_deg",
                "n_rows", "base_taper", "rows_short",
                "fill_px", "edge_holdout_px", "baseline_y", "Y_apex_full",
                "Y_widest_full", "Y_bottom_full", "clipped", "clipped_at_mat",

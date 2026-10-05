@@ -88,8 +88,15 @@ LIKELY_TOL = 0.05    # within 5%                     -> LIKELY
 
 # Calibration of the confidence scores (all in units of the bead's own height,
 # so they hold for any bead size or magnification).
-BASE_TAPER_MIN = 0.80   # below this the silhouette has no usable base, so its
-                        # contact radius means nothing -- see base_lost
+# Below this the silhouette has no usable base and its contact radius means
+# nothing (see base_lost).  0.98 is not a taste: it is where, on a bead that
+# wets its mat, the two independent radius definitions converge.  On a real
+# run the contact radius and the widest row agree to 0.01 points over the
+# frames above this threshold (-4.10% against -4.09%, as they must for a bead
+# whose widest row IS its base) and diverge below it (-6.81% against -4.33% at
+# 0.95), which is shadow erosion arriving.  Raise it and you lose frames;
+# lower it and the contact radius starts measuring the shadow's edge.
+BASE_TAPER_MIN = 0.98
 GAP_FULL = 0.15      # mask ending this far from the mat scores V_disk zero
 TAPER_FULL = 0.25    # base narrowed to (1 - this) of the widest row scores zero
 TRUNC_FULL = 0.03    # V_trunc discarding this share of the volume scores it zero
@@ -609,8 +616,12 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     # contact line had actually moved -5.3%.  The contact line is the thing
     # that pins, recedes and holds the material in tension, so the radial
     # strain is measured from this one.
-    m["a_contact_px"] = w_contact / 2.0
     m["base_lost"] = bool(m["base_taper"] < BASE_TAPER_MIN)
+    # NaN rather than a number, once the base is gone.  A silhouette can reach
+    # the mat and still be eroded to 57% of its width there, and the width
+    # then measures the shadow's edge: on a real run that read a 46% shrinking
+    # footprint under a widest row that moved 5.8%.
+    m["a_contact_px"] = (w_contact / 2.0) if not m["base_lost"] else np.nan
 
     # constant-radius fill from the widest row down to the mat
     m["V_base"] = m["V_trunc"] + float(np.pi * (w[i_w] / 2.0) ** 2 * fill)
@@ -935,9 +946,24 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     h0 = float(df.loc[ref, "h_px"])
     a0 = float(df.loc[ref, "a_px"])
     df["height_strain_pct"] = 100.0 * (df["h_px"] / h0 - 1.0) if h0 else np.nan
+    # Two radii, and NEITHER is right in every case, so the tool reports both
+    # and does not quietly choose:
+    #   a_px        the widest row.  Wrong for a bead that bulges, where the
+    #               widest row sits above the contact line -- measured 97 px
+    #               above it on one real run, making "radial strain" compare a
+    #               bulge radius against a contact radius.
+    #   a_contact   the width at the mat.  Wrong once shadow erodes the base,
+    #               which it does while the mask still touches the mat, so the
+    #               width there becomes the shadow's edge rather than the bead's.
+    # base_taper tells the two apart in the clear cases and does NOT in the
+    # margin: 0.972 for early erosion against 0.975 for a real bulge. Since no
+    # threshold separates those, radial_strain_pct stays on the widest row,
+    # which degrades gently, and radial_contact_pct carries the contact line
+    # for the frames where it can be measured at all.
     ac0 = float(df.loc[ref, "a_contact_px"])
-    df["radial_strain_pct"] = 100.0 * (df["a_contact_px"] / ac0 - 1.0) if ac0 else np.nan
-    df["radial_widest_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
+    df["radial_strain_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
+    df["radial_contact_pct"] = (100.0 * (df["a_contact_px"] / ac0 - 1.0)
+                                if np.isfinite(ac0) and ac0 else np.nan)
     if scale:
         df["a_contact_um"] = df["a_contact_px"] / scale
 
