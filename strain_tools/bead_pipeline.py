@@ -532,6 +532,14 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     i_w = int(np.argmax(w))
     m["h_px"] = h_px
     m["a_px"] = base_radius(w, cfg["A_METHOD"])
+    # Shape of the drop, not of the material.  Two beads of the same mix can
+    # sit on the mat very differently, and how much the shrinkage splits
+    # between vertical and radial depends on that rather than on the
+    # formulation -- so it has to be recorded before replicates can be
+    # compared.  theta = 2*atan(h/a) is the spherical-cap contact angle.
+    m["aspect_h_over_a"] = float(h_px / m["a_px"]) if m["a_px"] else np.nan
+    m["contact_angle_deg"] = (float(2 * math.degrees(math.atan(h_px / m["a_px"])))
+                              if m["a_px"] else np.nan)
     m["width_max_px"] = float(w.max())
     m["n_rows"] = int(len(Y))
     m["Y_apex_full"] = int(Y[0])
@@ -567,6 +575,9 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     if y_base is not None:
         h_px = float(y_base_eff - Y[0] + 1)
         m["h_px"] = h_px
+        if m["a_px"]:
+            m["aspect_h_over_a"] = float(h_px / m["a_px"])
+            m["contact_angle_deg"] = float(2 * math.degrees(math.atan(h_px / m["a_px"])))
     m["fill_px"] = fill
 
     # How wide the silhouette still was where it MET THE MAT.  Two details, both

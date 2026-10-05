@@ -333,6 +333,11 @@ def write_report(df, info, outdir):
             L.append(f"      vertical        {ez:+.2f} %   "
                      f"height {u['h_um'].iloc[0]:,.0f} -> {u['h_um'].iloc[-1]:,.0f} um"
                      if "h_um" in u.columns else f"      vertical        {ez:+.2f} %")
+            if "contact_angle_deg" in u.columns:
+                L.append(f"      drop shape      h/a {u['aspect_h_over_a'].iloc[0]:.3f} "
+                         f"-> {u['aspect_h_over_a'].iloc[-1]:.3f}, contact angle "
+                         f"{u['contact_angle_deg'].iloc[0]:.0f} -> "
+                         f"{u['contact_angle_deg'].iloc[-1]:.0f} deg")
             L.append(f"      radial          {er:+.2f} %   "
                      f"base r {u['a_um'].iloc[0]:,.0f} -> {u['a_um'].iloc[-1]:,.0f} um"
                      if "a_um" in u.columns else f"      radial          {er:+.2f} %")
@@ -386,7 +391,8 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
             + [f"{k}{s}" for k in bp.METHODS for s in ("", "_um3", "_mm3")
                if f"{k}{s}" in df.columns]
             + [f"conf_{k}" for k in bp.METHODS]
-            + ["h_px", "a_px", "h_um", "a_um", "n_rows", "base_taper", "rows_short",
+            + ["h_px", "a_px", "h_um", "a_um", "aspect_h_over_a", "contact_angle_deg",
+               "n_rows", "base_taper", "rows_short",
                "fill_px", "edge_holdout_px", "baseline_y", "Y_apex_full",
                "Y_widest_full", "Y_bottom_full", "clipped", "clipped_at_mat",
                "brightness", "V_over_V0", "vol_shrinkage_pct", "vol_strain_pct",
