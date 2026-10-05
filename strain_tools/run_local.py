@@ -131,16 +131,22 @@ def add_image_number_axis(ax, df, t=None):
 
 
 # ------------------------------------------------------------------ plotting
-def plot_strain(df, info, out):
-    """THE plot: linear strain against time, with image number across the top."""
+def plot_vs_time(df, info, out, col, title, ylabel, headline="final  {v:+.2f}%",
+                 colour=None, zero_line=True):
+    """One measured quantity against time, every point wearing its verdict.
+
+    Shared by the strain and the geometry plots so they read as one family and
+    a quarantined frame is marked the same way everywhere.
+    """
     fig, ax = plt.subplots(figsize=(9.5, 5.2))
     t, xl, is_time = time_axis(df, info)
-    y = df["linear_strain_pct"].to_numpy(float)
+    y = df[col].to_numpy(float)
     use = df["use"].to_numpy(bool)
 
-    ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
-    ax.plot(t[use], y[use], "-", lw=2, color=SERIES["V_disk"], zorder=3,
-            label="linear strain (consensus volume)")
+    if zero_line:
+        ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
+    ax.plot(t[use], y[use], "-", lw=2, color=colour or SERIES["V_disk"], zorder=3,
+            label=ylabel)
 
     # Each point wears its verdict: colour AND marker AND the legend naming it.
     for tier in ("CERTIFIED", "LIKELY", "SINGLE", "CONFLICT", "REJECT"):
@@ -150,20 +156,65 @@ def plot_strain(df, info, out):
         ax.plot(t[sel], y[sel], MARKER[tier], ms=8, mfc=STATUS[tier],
                 mec=SURFACE, mew=2, ls="none", zorder=4,
                 label=f"{tier}  ({int(sel.sum())})")
-
     if (~use).any():
         ax.plot(t[~use], y[~use], "o", ms=14, mfc="none", mec=STATUS["REJECT"],
                 mew=1.4, ls="none", zorder=5, label="quarantined (left out)")
 
-    tidy(ax, "Linear shrinkage strain of the bead", xl, "linear strain (%)")
+    tidy(ax, title, xl, ylabel)
     if is_time:
         add_image_number_axis(ax, df, t)
-
-    fin = y[use][-1] if use.any() else np.nan
-    ax.text(0.99, 0.97, f"final  {fin:+.2f}%", transform=ax.transAxes,
-            ha="right", va="top", fontsize=13, fontweight="bold", color=INK)
+    if headline:
+        fin = y[use][-1] if use.any() and np.isfinite(y[use]).any() else np.nan
+        ax.text(0.99, 0.97, headline.format(v=fin), transform=ax.transAxes,
+                ha="right", va="top", fontsize=13, fontweight="bold", color=INK)
     ax.legend(frameon=False, fontsize=9, loc="lower left", ncol=2,
               bbox_to_anchor=(0.0, -0.02))
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_shape_strain(df, info, out):
+    """Height, footprint and the cube-root number on one axis, so it is obvious
+    whether the bead is shrinking the same way in every direction.
+
+    All three are percentages of the same reference frame, which is why they
+    can share an axis -- and sharing it is the point: the gap between the top
+    and bottom curves IS the anisotropy.
+    """
+    fig, ax = plt.subplots(figsize=(9.5, 5.2))
+    t, xl, is_time = time_axis(df, info)
+    use = df["use"].to_numpy(bool)
+    series = [("height_strain_pct", "vertical", SERIES["V_disk"]),
+              ("radial_strain_pct", "radial (base)", SERIES["V_extrap"]),
+              ("linear_strain_pct", "isotropic equivalent", SERIES["V_base"])]
+    ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
+    ends = []
+    for col, lab, c in series:
+        if col not in df.columns:
+            continue
+        y = df[col].to_numpy(float)
+        ax.plot(t[use], y[use], "-", lw=2.2, color=c, zorder=3, label=lab)
+        ends.append((t[use][-1], y[use][-1], lab, c))
+    tidy(ax, "Is the bead shrinking the same way in every direction?", xl, "strain (%)")
+    if is_time:
+        add_image_number_axis(ax, df, t)
+    # room on the right for the direct labels, none on the left: padding there
+    # just puts negative time on the axis
+    span = (t.max() - t.min()) or 1.0
+    ax.set_xlim(t.min() - 0.02 * span, t.max() + 0.26 * span)
+    place_end_labels(ax, ends)
+
+    if {"height_strain_pct", "radial_strain_pct"} <= set(df.columns) and use.any():
+        ez = df["height_strain_pct"].to_numpy(float)[use][-1]
+        er = df["radial_strain_pct"].to_numpy(float)[use][-1]
+        if np.isfinite(ez) and np.isfinite(er) and abs(er) > 1e-9:
+            note = (f"vertical {ez:+.1f}%  vs  radial {er:+.1f}%   =  {ez/er:.1f}x"
+                    if ez / er > 1.25 else
+                    f"vertical {ez:+.1f}%  vs  radial {er:+.1f}%   (near isotropic)")
+            ax.text(0.01, 0.04, note, transform=ax.transAxes, fontsize=11,
+                    fontweight="bold", color=INK)
+    ax.legend(frameon=False, fontsize=9, loc="upper right")
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -188,7 +239,8 @@ def plot_volumes(df, info, out):
          xl, "volume (mm$^3$)" if unit else "volume (px$^3$)")
     if is_time:
         add_image_number_axis(ax, df, t)
-    ax.margins(x=0.10)
+    span = (t.max() - t.min()) or 1.0
+    ax.set_xlim(t.min() - 0.02 * span, t.max() + 0.16 * span)
     # direct labels last, once the limits are final: the contrast WARN on two
     # of these four slots is relieved by a visible label, not by the legend
     place_end_labels(ax, ends)
@@ -271,8 +323,26 @@ def write_report(df, info, outdir):
         L.append(f"  RESULT  ({f0} -> {f1}; {len(u)} of {len(df)} frames used)")
         L.append(f"    initial volume    {v0:.4e} px^3   =  {v0/scale**3/1e9:.4f} mm^3")
         L.append(f"    final volume      {v1:.4e} px^3   =  {v1/scale**3/1e9:.4f} mm^3")
-        L.append(f"    volume shrinkage  {u['vol_shrinkage_pct'].iloc[-1]:+.2f} %")
-        L.append(f"    LINEAR STRAIN     {u['linear_strain_pct'].iloc[-1]:+.2f} %")
+        L.append(f"    VOLUMETRIC STRAIN {u['vol_strain_pct'].iloc[-1]:+.2f} %"
+                 f"   (shrinkage {u['vol_shrinkage_pct'].iloc[-1]:+.2f} %)")
+        L.append(f"    linear strain     {u['linear_strain_pct'].iloc[-1]:+.2f} %"
+                 f"   (cube root of the volume ratio)")
+        if {"height_strain_pct", "radial_strain_pct"} <= set(u.columns):
+            ez = float(u["height_strain_pct"].iloc[-1])
+            er = float(u["radial_strain_pct"].iloc[-1])
+            L.append(f"      vertical        {ez:+.2f} %   "
+                     f"height {u['h_um'].iloc[0]:,.0f} -> {u['h_um'].iloc[-1]:,.0f} um"
+                     if "h_um" in u.columns else f"      vertical        {ez:+.2f} %")
+            L.append(f"      radial          {er:+.2f} %   "
+                     f"base r {u['a_um'].iloc[0]:,.0f} -> {u['a_um'].iloc[-1]:,.0f} um"
+                     if "a_um" in u.columns else f"      radial          {er:+.2f} %")
+            if abs(er) > 1e-9 and ez / er > 1.25:
+                L.append(f"      -> this bead shrinks {ez/er:.1f}x more vertically than it does")
+                L.append( "         radially, so the linear strain above is a geometric mean")
+                L.append( "         and not the strain in any direction the bead actually has.")
+                L.append( "         A footprint that barely moves while the height collapses is")
+                L.append( "         a pinned contact line, which holds the material in radial")
+                L.append( "         tension as it dries.")
         L.append(f"    median spread     {u['spread_pct'].median():.2f} % between "
                  f"{' and '.join(info['trust'])}")
     L.append("")
@@ -316,11 +386,29 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
             + ["h_px", "a_px", "h_um", "a_um", "n_rows", "base_taper", "rows_short",
                "fill_px", "edge_holdout_px", "baseline_y", "Y_apex_full",
                "Y_widest_full", "Y_bottom_full", "clipped", "clipped_at_mat",
-               "brightness", "V_over_V0", "vol_shrinkage_pct", "linear_strain_pct"])
+               "brightness", "V_over_V0", "vol_shrinkage_pct", "vol_strain_pct",
+               "linear_strain_pct", "height_strain_pct", "radial_strain_pct"])
     cols = [c for c in cols if c in df.columns]
     df[cols].to_csv(os.path.join(outdir, "per_image.csv"), index=False)
 
-    plot_strain(df, info, os.path.join(outdir, "linear_strain.png"))
+    um = "h_um" in df.columns
+    plot_vs_time(df, info, os.path.join(outdir, "linear_strain.png"),
+                 "linear_strain_pct", "Linear shrinkage strain of the bead",
+                 "linear strain (%)")
+    plot_vs_time(df, info, os.path.join(outdir, "volumetric_strain.png"),
+                 "vol_strain_pct", "Volumetric strain of the bead",
+                 "volumetric strain (%)", colour=SERIES["V_extrap"])
+    plot_vs_time(df, info, os.path.join(outdir, "height.png"),
+                 "h_um" if um else "h_px", "Bead height",
+                 "height (um)" if um else "height (px)",
+                 headline="final  {v:,.0f}", colour=SERIES["V_disk"],
+                 zero_line=False)
+    plot_vs_time(df, info, os.path.join(outdir, "base_radius.png"),
+                 "a_um" if um else "a_px", "Bead base radius",
+                 "base radius (um)" if um else "base radius (px)",
+                 headline="final  {v:,.0f}", colour=SERIES["V_extrap"],
+                 zero_line=False)
+    plot_shape_strain(df, info, os.path.join(outdir, "shape_strain.png"))
     plot_volumes(df, info, os.path.join(outdir, "volumes.png"))
     plot_agreement(df, info, os.path.join(outdir, "agreement.png"))
 

@@ -63,6 +63,10 @@ Outputs, written into `<folder>/analysis/`:
 | file | what it is |
 |---|---|
 | `linear_strain.png` | linear strain vs **time**, with **image number** across the top |
+| `volumetric_strain.png` | volumetric strain vs time |
+| `height.png` | bead height (um) vs time |
+| `base_radius.png` | bead base radius (um) vs time |
+| `shape_strain.png` | vertical, radial and isotropic-equivalent strain on one axis |
 | `volumes.png` | all four estimators over the run |
 | `agreement.png` | how far apart the deciding estimators were, frame by frame |
 | `per_image.csv` | every number for every frame |
@@ -184,6 +188,34 @@ quiet wrongness this machinery exists to prevent.
 Brightness outliers (exposure glitch, a shadow crossing the frame) are flagged
 by MAD on each frame's mean brightness and their volumes interpolated from the
 neighbours.
+
+## Three strains, not one
+
+`linear_strain_pct` is the cube root of the volume ratio. That is a real linear
+strain **only if the bead shrinks equally in every direction**, and a sessile
+bead pinned to its mat does not: it collapses in height while its footprint
+stays put. So the pipeline also measures the two strains the bead actually has,
+from the height and base radius it already records every frame:
+
+| column | what it is |
+|---|---|
+| `vol_strain_pct` | ΔV/V₀, signed (`vol_shrinkage_pct` is the same number, positive) |
+| `linear_strain_pct` | (V/V₀)^⅓ − 1 — the isotropic equivalent |
+| `height_strain_pct` | h/h₀ − 1 — vertical |
+| `radial_strain_pct` | a/a₀ − 1 — radial |
+
+When the last two differ by more than 25%, the summary says so and names the
+likely cause. On a real 81-frame run they came out **−15.2% vertical against
+−5.8% radial**, a factor of 2.6, where the cube root reported −9.2% for both.
+A footprint that barely moves while the height collapses is a pinned contact
+line, which holds the material in radial tension as it dries — which is the
+thing worth measuring, and the thing a single cube-rooted number hides.
+
+Validated both ways. On a synthetic cap built to shrink **isotropically**, the
+three agree (vertical −10.93%, radial −11.09%, linear −11.13%), so the measure
+does not invent anisotropy. On one built with a pinned base — true vertical
+−15.00%, true radial −6.00% — it reads −15.52% and −6.46%, both within half a
+point, and the warning fires.
 
 ## Accuracy
 

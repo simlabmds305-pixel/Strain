@@ -877,8 +877,22 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
         ref, V0 = df.index[0], float(df.loc[df.index[0], "V_consensus"])
 
     df["V_over_V0"] = df["V_consensus"] / V0
-    df["vol_shrinkage_pct"] = 100.0 * (1.0 - df["V_over_V0"])
+    df["vol_shrinkage_pct"] = 100.0 * (1.0 - df["V_over_V0"])      # positive as it dries
+    df["vol_strain_pct"] = 100.0 * (df["V_over_V0"] - 1.0)         # same thing, signed
     df["linear_strain_pct"] = 100.0 * (df["V_over_V0"] ** (1.0 / 3.0) - 1.0)
+
+    # The two strains the bead actually has, measured rather than inferred.
+    # linear_strain_pct above is the cube root of the volume ratio, which is a
+    # real linear strain ONLY if the bead shrinks equally in every direction.
+    # A sessile bead pinned to its mat does not: it collapses in height while
+    # its footprint stays put.  Measured on one real run, -15.2% vertical
+    # against -5.8% radial -- a factor of 2.6 -- where the cube root reported
+    # -9.2% for both.  Reporting these two beside it is the difference between
+    # a number that describes the bead and a number that assumes it away.
+    h0 = float(df.loc[ref, "h_px"])
+    a0 = float(df.loc[ref, "a_px"])
+    df["height_strain_pct"] = 100.0 * (df["h_px"] / h0 - 1.0) if h0 else np.nan
+    df["radial_strain_pct"] = 100.0 * (df["a_px"] / a0 - 1.0) if a0 else np.nan
 
     info = dict(cfg=cfg, baseline_y=y_base, baseline_source=src,
                 baseline_conf=base_conf, baseline_notes=notes,
