@@ -207,9 +207,13 @@ from the height and base radius it already records every frame:
 When the last two differ by more than 25%, the summary says so and names the
 likely cause. On a real 81-frame run they came out **−15.2% vertical against
 −5.8% radial**, a factor of 2.6, where the cube root reported −9.2% for both.
-A footprint that barely moves while the height collapses is a pinned contact
-line, which holds the material in radial tension as it dries — which is the
-thing worth measuring, and the thing a single cube-rooted number hides.
+A footprint held back while the height collapses means the contact line is
+resisting, which puts the material in radial tension as it dries — the thing
+worth measuring, and the thing a single cube-rooted number hides. Whether it
+is fully pinned or receding slowly is a different question, and the ratio
+alone cannot answer it: read `base_radius.png`, where a pinned line is flat
+and a receding one slopes. On the real run above it recedes 133 um over the
+first 44 minutes and then arrests, so it is neither.
 
 Validated both ways. On a synthetic cap built to shrink **isotropically**, the
 three agree (vertical −10.93%, radial −11.09%, linear −11.13%), so the measure

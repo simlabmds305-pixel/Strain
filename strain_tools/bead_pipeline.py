@@ -528,7 +528,7 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
 
     m = {}
     r = w / 2.0
-    h_px = float(len(Y))
+    h_px = float(len(Y))          # provisional: replaced below once the mat is known
     i_w = int(np.argmax(w))
     m["h_px"] = h_px
     m["a_px"] = base_radius(w, cfg["A_METHOD"])
@@ -551,6 +551,22 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     fill = max(0.0, y_base_eff - Y[i_w])
     m["baseline_y"] = y_base_eff
     m["rows_short"] = float(y_base_eff - Y[-1])
+    m["fill_px"] = fill
+
+    # Height is APEX TO MAT, not the number of rows the mask happens to have.
+    # Both ends are then measured independently of where the threshold gave up:
+    # the apex from the top of the silhouette, the mat from its own colour.
+    # Counting mask rows instead inherits every wobble at the bottom -- a mask
+    # allowed to leak up to CLIP_TOLERANCE_PX past the mat reports a height
+    # that much too large, which on one real run put a 37 um sawtooth through
+    # the height curve and moved the vertical strain from -15.3% to -13.6%.
+    # Measured on that run: frame-to-frame jitter 0.45 px this way against
+    # 2.14 px counting rows, and the answer matches a separate run of the same
+    # bead under a different crop to 0.2 points.
+    # n_rows still records what the mask actually found.
+    if y_base is not None:
+        h_px = float(y_base_eff - Y[0] + 1)
+        m["h_px"] = h_px
     m["fill_px"] = fill
 
     # How wide the silhouette still was where it MET THE MAT.  Two details, both
