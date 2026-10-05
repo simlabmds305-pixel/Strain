@@ -368,32 +368,74 @@ def _tk_root():
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)      # else the dialog hides behind the console
-    return root
+    root.update()                          # without this the attribute is never applied
+    return root                            # and the dialog opens behind, or not at all
+
+
+def _ask_console(prompt):
+    """Last resort when no dialog appears: take the answer on the console."""
+    try:
+        return input(prompt).strip().strip('"').strip("'")
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 def choose_folder(start=None):
-    """Folder picker.  Returns the path, or None if cancelled."""
-    from tkinter import filedialog
-    root = _tk_root()
-    d = filedialog.askdirectory(
-        title="Choose the folder of bead images",
-        initialdir=start if start and os.path.isdir(start) else os.path.expanduser("~"),
-        mustexist=True)
-    root.destroy()
+    """Folder picker, falling back to a typed path.  None if given up on."""
+    print("  opening a folder picker - if you cannot see it, look in the taskbar or "
+          "press Alt+Tab (it can open behind this window)", flush=True)
+    try:
+        from tkinter import filedialog
+        root = _tk_root()
+        try:
+            d = filedialog.askdirectory(
+                title="Choose the folder of bead images",
+                initialdir=start if start and os.path.isdir(start) else os.path.expanduser("~"),
+                mustexist=True, parent=root)
+        finally:
+            root.destroy()
+        if d:
+            return d
+        print("  nothing chosen in the picker.")
+    except Exception as e:
+        print(f"  the folder picker could not open ({type(e).__name__}: {e}).")
+    d = _ask_console("  type or paste the folder path, then Enter (blank to quit):\n  folder> ")
     return d or None
 
 
 def ask_interval(default=60.0):
-    """Seconds between frames.  Returns a float, or None for 'use image number'."""
-    from tkinter import simpledialog
-    root = _tk_root()
-    v = simpledialog.askfloat(
-        "Time between images",
-        "Seconds between frames.\n\n"
-        "Cancel = plot against image number instead of time.",
-        initialvalue=default, minvalue=0.0, parent=root)
-    root.destroy()
-    return v
+    """Seconds between frames, falling back to the console.  None = image number.
+
+    `default` is whatever was remembered last time, and last time may have been
+    "no interval", which comes back as None -- so it cannot be formatted or
+    handed to a spinbox until it has been given a number to fall back on.
+    """
+    try:
+        default = 60.0 if default is None else float(default)
+    except (TypeError, ValueError):
+        default = 60.0
+    try:
+        from tkinter import simpledialog
+        root = _tk_root()
+        try:
+            v = simpledialog.askfloat(
+                "Time between images",
+                "Seconds between frames.\n\n"
+                "Cancel = plot against image number instead of time.",
+                initialvalue=default, minvalue=0.0, parent=root)
+        finally:
+            root.destroy()
+        return v
+    except Exception:
+        pass
+    raw = _ask_console(f"  seconds between frames [{default:g}] "
+                       f"(or 'n' to use image number): ")
+    if raw.lower().startswith("n"):
+        return None
+    try:
+        return float(raw) if raw else float(default)
+    except ValueError:
+        return float(default)
 
 
 def looks_like_parent(folder, pattern="*"):
@@ -454,14 +496,11 @@ def main(argv=None):
     # ---- no folder given: ask for everything, like the cantilever app ----
     interactive = a.folder is None
     if interactive:
-        try:
-            a.folder = choose_folder(cfgsave.get("last_dir"))
-        except Exception as e:
-            raise SystemExit(f"could not open the folder picker ({e}).\n"
-                             f"Pass the folder on the command line instead:\n"
-                             f'  python run_local.py "C:\\path\\to\\images" --interval 60')
+        a.folder = choose_folder(cfgsave.get("last_dir"))
         if not a.folder:
-            raise SystemExit("no folder chosen")
+            raise SystemExit("no folder chosen - nothing to do")
+        if not os.path.isdir(a.folder):
+            raise SystemExit(f"not a folder: {a.folder}")
         print(f"folder: {a.folder}")
         if a.interval is None and not a.time_regex:
             a.interval = ask_interval(cfgsave.get("interval", 60.0))
@@ -493,7 +532,15 @@ def main(argv=None):
             if subs:
                 first = subs[0]
         seed = cfg["ROI"] or (tuple(cfgsave["roi"]) if cfgsave.get("roi") else None)
-        roi = pick_roi.pick_for_folder(first, a.pattern, seed)
+        print("  opening the first image to draw the crop on - again, check the "
+              "taskbar if you cannot see it", flush=True)
+        try:
+            roi = pick_roi.pick_for_folder(first, a.pattern, seed)
+        except Exception as e:
+            print(f"  the crop picker could not open ({e})")
+            raw = _ask_console("  type the crop as x0,x1,y0,y1, or Enter for the "
+                               "whole frame:\n  roi> ")
+            roi = parse_roi(raw) if raw else None
         if roi:
             cfg["ROI"] = roi
             print(f"using --roi {roi[0]},{roi[1]},{roi[2]},{roi[3]}  "

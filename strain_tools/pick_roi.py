@@ -51,6 +51,11 @@ def pick(path, start_roi=None):
                 break
             except Exception:
                 continue
+    if matplotlib.get_backend().lower() == "agg":
+        raise RuntimeError(
+            "matplotlib has no window backend here (still on Agg), so the crop "
+            "cannot be drawn. Either install one (pip install pyqt5) or pass the "
+            "crop directly with --roi x0,x1,y0,y1")
     import matplotlib.pyplot as plt
     from matplotlib.widgets import RectangleSelector
 
