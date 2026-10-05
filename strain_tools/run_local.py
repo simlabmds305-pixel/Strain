@@ -55,6 +55,28 @@ plt.rcParams.update({
 })
 
 
+def time_axis(df, info):
+    """x values and their label: seconds, minutes or hours, whichever reads best.
+
+    Returns (values, label, is_time).  A 77-frame run at one frame a minute is
+    4560 s, which nobody reads as "an hour and a quarter".  Only a run timed by
+    --interval is converted: with --time-regex the number came out of the file
+    name and its unit is whatever you named it, so it is left exactly as read.
+    """
+    t = df["t_s"].to_numpy(float)
+    cfg = info["cfg"]
+    if cfg.get("TIME_REGEX"):
+        return t, "time (from file name)", True
+    if not cfg.get("INTERVAL_S"):
+        return t, "image number", False
+    span = float(np.nanmax(t) - np.nanmin(t)) if len(t) else 0.0
+    if span >= 7200:
+        return t / 3600.0, "time (h)", True
+    if span >= 180:
+        return t / 60.0, "time (min)", True
+    return t, "time (s)", True
+
+
 def place_end_labels(ax, items, pad_frac=0.052):
     """Direct-label each series at its right-hand end, pushed apart so they stay
     readable where the series converge -- which, for four estimators of the same
@@ -89,13 +111,13 @@ def tidy(ax, title=None, xlabel=None, ylabel=None):
     ax.set_axisbelow(True)
 
 
-def add_image_number_axis(ax, df):
+def add_image_number_axis(ax, df, t=None):
     """A second x axis across the top showing the image number.
 
     The same data on both axes -- time below, frame index above -- so a point
     can be read either way.  (Not a second y scale: those are never allowed.)
     """
-    t = df["t_s"].to_numpy(float)
+    t = df["t_s"].to_numpy(float) if t is None else np.asarray(t, float)
     i = df["index"].to_numpy(float)
     if len(t) < 2 or np.ptp(t) == 0:
         return
@@ -112,7 +134,7 @@ def add_image_number_axis(ax, df):
 def plot_strain(df, info, out):
     """THE plot: linear strain against time, with image number across the top."""
     fig, ax = plt.subplots(figsize=(9.5, 5.2))
-    t = df["t_s"].to_numpy(float)
+    t, xl, is_time = time_axis(df, info)
     y = df["linear_strain_pct"].to_numpy(float)
     use = df["use"].to_numpy(bool)
 
@@ -133,11 +155,9 @@ def plot_strain(df, info, out):
         ax.plot(t[~use], y[~use], "o", ms=14, mfc="none", mec=STATUS["REJECT"],
                 mew=1.4, ls="none", zorder=5, label="quarantined (left out)")
 
-    xl = "time (s)" if info["cfg"].get("INTERVAL_S") or info["cfg"].get("TIME_REGEX") \
-        else "image number"
     tidy(ax, "Linear shrinkage strain of the bead", xl, "linear strain (%)")
-    if xl == "time (s)":
-        add_image_number_axis(ax, df)
+    if is_time:
+        add_image_number_axis(ax, df, t)
 
     fin = y[use][-1] if use.any() else np.nan
     ax.text(0.99, 0.97, f"final  {fin:+.2f}%", transform=ax.transAxes,
@@ -152,7 +172,7 @@ def plot_strain(df, info, out):
 def plot_volumes(df, info, out):
     """The four estimators over the run, direct-labelled."""
     fig, ax = plt.subplots(figsize=(9.5, 5.2))
-    t = df["t_s"].to_numpy(float)
+    t, xl, is_time = time_axis(df, info)
     unit = "mm3" if "V_disk_mm3" in df.columns else None
     ends = []
     for k, c in SERIES.items():
@@ -164,12 +184,10 @@ def plot_volumes(df, info, out):
                 label=k + (" (trusted)" if trusted else ""))
         ends.append((t[-1], v[-1], k, c))
 
-    xl = "time (s)" if info["cfg"].get("INTERVAL_S") or info["cfg"].get("TIME_REGEX") \
-        else "image number"
     tidy(ax, "Four volume estimators  (they differ only below the widest row)",
          xl, "volume (mm$^3$)" if unit else "volume (px$^3$)")
-    if xl == "time (s)":
-        add_image_number_axis(ax, df)
+    if is_time:
+        add_image_number_axis(ax, df, t)
     ax.margins(x=0.10)
     # direct labels last, once the limits are final: the contrast WARN on two
     # of these four slots is relieved by a visible label, not by the legend
@@ -184,7 +202,7 @@ def plot_agreement(df, info, out):
     """How far apart the trusted estimators were, frame by frame -- the evidence
     behind each verdict."""
     fig, ax = plt.subplots(figsize=(9.5, 4.2))
-    t = df["t_s"].to_numpy(float)
+    t, xl, is_time = time_axis(df, info)
     s = df["spread_pct"].to_numpy(float)
     ax.axhspan(0, 100 * bp.CERT_TOL, color=STATUS["CERTIFIED"], alpha=0.10, zorder=0)
     ax.axhspan(100 * bp.CERT_TOL, 100 * bp.LIKELY_TOL, color=STATUS["LIKELY"],
@@ -199,8 +217,6 @@ def plot_agreement(df, info, out):
             continue
         ax.plot(t[sel], s[sel], MARKER[tier], ms=7, mfc=STATUS[tier], mec=SURFACE,
                 mew=1.5, ls="none", label=f"{tier} ({int(sel.sum())})")
-    xl = "time (s)" if info["cfg"].get("INTERVAL_S") or info["cfg"].get("TIME_REGEX") \
-        else "image number"
     tidy(ax, f"Disagreement between {' and '.join(info['deciders'])}", xl,
          "spread (% of volume)")
     ax.margins(y=0.18)
