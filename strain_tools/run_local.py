@@ -412,7 +412,7 @@ def write_report(df, info, outdir):
 
 
 # ----------------------------------------------------------------------- run
-def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
+def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="analysis"):
     paths = bp.list_frames(folder, pattern)
     if len(paths) < 2:
         raise SystemExit(f"{folder}: found {len(paths)} image(s); need at least 2")
@@ -421,7 +421,7 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False):
     df, info = bp.analyse_folder(paths, cfg, workers=workers)
     secs = time.time() - t0
 
-    outdir = os.path.join(folder, "analysis")
+    outdir = os.path.join(folder, out_name or "analysis")
     os.makedirs(outdir, exist_ok=True)
 
     cols = (["index", "image", "t_s", "tier", "use", "outlier", "V_consensus",
@@ -649,6 +649,10 @@ def main(argv=None):
     ap.add_argument("--one-roi", action="store_true",
                     help="with --each, draw ONE crop and use it for every subfolder "
                          "(default: you are asked for each, since the bead moves)")
+    ap.add_argument("--out", default="analysis", metavar="NAME",
+                    help="name of the results folder inside the image folder "
+                         "(default 'analysis'). Use a different one to compare "
+                         "settings without overwriting a good result.")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     cfgsave = load_settings()
@@ -731,7 +735,7 @@ def main(argv=None):
             elif shared is not None:
                 cfg_sub["ROI"] = shared
             try:
-                run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet)
+                run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet, a.out)
             except SystemExit as e:
                 print(f"  skipped: {e}")
             except Exception as e:
@@ -742,7 +746,7 @@ def main(argv=None):
             cfg["ROI"] = ask_roi(a.folder, seed)
         save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
                            roi=list(cfg["ROI"]) if cfg["ROI"] else None))
-        run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet)
+        run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out)
 
 
 if __name__ == "__main__":
