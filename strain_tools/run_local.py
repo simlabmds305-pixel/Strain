@@ -252,6 +252,7 @@ def write_report(df, info, outdir):
     for k in bp.METHODS:
         mark = "  <- decides" if k in info["deciders"] else ""
         L.append(f"    {k:<10s} {info['med_conf'][k]:.2f}{mark}")
+    L.append(f"    (a frame is called broken below {info['reject_below']:.2f})")
     L.append("")
     L.append("  verdicts")
     for t in ("CERTIFIED", "LIKELY", "SINGLE", "CONFLICT", "REJECT"):

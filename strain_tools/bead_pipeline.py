@@ -67,8 +67,17 @@ TRUST_METHODS = ("V_disk", "V_extrap")
 
 METHODS = ("V_disk", "V_trunc", "V_base", "V_extrap")
 
-# Confidence floor: below this an estimator does not take part in the verdict.
+# Confidence floor: below this an estimator is not worth listening to AT ALL,
+# and does not get to decide the run.  See choose_deciders.
 MIN_CONF = 0.35
+
+# When is a single FRAME broken?  Not by comparison with a constant: the whole
+# run's confidences move together (they share a baseline, a mat, a lamp), so a
+# fixed cut lands wherever that common level happens to sit and then splits
+# neighbouring frames on noise.  A frame is broken when it is much worse than
+# the run it belongs to -- with an absolute floor for genuine rubbish.
+FRAME_REJECT_FRAC = 0.5      # of the run's median best-decider confidence
+FRAME_REJECT_ABS = 0.10
 
 # Agreement tolerances, as a FRACTION of the consensus volume.  Volumes run to
 # ~1e8 px^3 and shrink by tens of percent over a run, so an absolute tolerance
@@ -421,7 +430,16 @@ def resolve_baseline(frames, cfg):
                 # Confidence: how many images saw the same edge, and how tightly.
                 frac = len(agree) / float(len(frames))
                 tight = clip01(1 - float(np.std(agree)) / 15.0)
-                return float(np.median(agree)), "blue", clip01(0.5 + 0.5 * frac) * max(0.4, tight), notes
+                # The floor matters more than it looks.  This value multiplies
+                # every confidence in the run, so if it lands near MIN_CONF the
+                # whole run sits on the decision gate and frames split between
+                # CERTIFIED and REJECT on the third decimal place.  With the old
+                # floor of 0.4 a real run scored 0.901 x 0.4 = 0.36 against a
+                # gate of 0.35, and did exactly that.  Getting here already
+                # required agreement within 30 px on 60% of frames, which is
+                # decent evidence; score it like evidence.
+                conf = clip01(0.5 + 0.5 * frac) * (0.65 + 0.35 * tight)
+                return float(np.median(agree)), "blue", conf, notes
             notes.append(f"the colour edge disagrees with itself: {len(found)} images gave rows "
                          f"spanning {np.ptp(found):.0f} px. The mat cannot move, so that is not "
                          f"the mat -- most likely it is not coloured here, or it is outside the "
@@ -519,7 +537,6 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     m["Y_apex_full"] = int(Y[0])
     m["Y_widest_full"] = int(Y[i_w])
     m["Y_bottom_full"] = int(Y[-1])
-    m["base_taper"] = float(w[-1] / w.max()) if w.max() else np.nan
     m["clipped_at_mat"] = bool(frame.get("clipped_at_mat", False))
     m["clip_refused"] = bool(frame.get("clip_refused", False))
 
@@ -535,6 +552,22 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     m["baseline_y"] = y_base_eff
     m["rows_short"] = float(y_base_eff - Y[-1])
     m["fill_px"] = fill
+
+    # How wide the silhouette still was where it MET THE MAT.  Two details, both
+    # learned from a real run where this read 0.0006 for a silhouette that was
+    # full width at the contact line:
+    #   - rows below the mat are excluded.  A mask allowed to leak a few pixels
+    #     past the mat (anything inside CLIP_TOLERANCE_PX is deliberately not
+    #     clipped) ends in a 1-3 px spike of mat, and the last row is then that
+    #     spike rather than the bead.
+    #   - several rows, not one.  A single row is one threshold decision.
+    # Read off the final row alone it collapsed to ~0 on 30 of 81 frames, took
+    # V_disk's confidence to zero with it, and quarantined the entire second
+    # half of a run whose volumes were in fact smooth to better than 1%.
+    above = Y <= y_base_eff + 0.5
+    w_t = w[above] if above.any() else w
+    k = int(min(5, len(w_t)))
+    m["base_taper"] = float(np.median(w_t[-k:]) / w.max()) if w.max() else np.nan
 
     # constant-radius fill from the widest row down to the mat
     m["V_base"] = m["V_trunc"] + float(np.pi * (w[i_w] / 2.0) ** 2 * fill)
@@ -644,7 +677,7 @@ def choose_deciders(conf_table, trust=TRUST_METHODS):
     return [max(med, key=med.get)], med
 
 
-def verdict_for(m, deciders, weights):
+def verdict_for(m, deciders, weights, reject_below=MIN_CONF):
     """Consensus volume and verdict tier for one frame, from the run's deciders.
 
     `weights` are the run's MEDIAN confidences, deliberately not this frame's.
@@ -667,7 +700,7 @@ def verdict_for(m, deciders, weights):
     is the one case the gate still decides.
     """
     usable = [k for k in deciders if np.isfinite(m.get(k, np.nan))]
-    if usable and max(m.get(f"conf_{k}", 0.0) for k in usable) < MIN_CONF:
+    if usable and max(m.get(f"conf_{k}", 0.0) for k in usable) < reject_below:
         usable = []
 
     if not usable:
@@ -785,8 +818,11 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # Who decides, for this run as a whole, then the per-frame verdicts.
     conf_table = {k: np.array([r[f"conf_{k}"] for r in rows], float) for k in METHODS}
     deciders, med_conf = choose_deciders(conf_table)
+    best = np.array([max((r.get(f"conf_{k}", 0.0) for k in deciders), default=0.0)
+                     for r in rows], float)
+    reject_below = max(FRAME_REJECT_ABS, FRAME_REJECT_FRAC * float(np.nanmedian(best)))
     for m in rows:
-        m.update(verdict_for(m, deciders, med_conf))
+        m.update(verdict_for(m, deciders, med_conf, reject_below))
 
     df = pd.DataFrame(rows)
 
@@ -804,14 +840,25 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # much more than the run normally does, or one whose mask is simply broken.
     # So: quarantine the OUTLIERS, and report the systematic part as a caveat
     # on the absolute volume.
+    # Compared against its NEIGHBOURS, not against the run's own median.  The
+    # disagreement usually drifts upward over a run -- the base is lost to
+    # shadow a little more in every frame -- and a global median then reads
+    # that trend as a heap of outliers and quarantines the whole back half.
+    # On a real 81-frame run it cut the curve off at frame 50 and reported
+    # -10.4% where the full run gives about -12.2%.  A local median flags what
+    # we actually want flagged: a frame that disagrees far more than the frames
+    # either side of it.
     s = df["spread_pct"].to_numpy(float)
-    if np.isfinite(s).any():
-        med_s = float(np.nanmedian(s[np.isfinite(s)]))
-        mad_s = float(np.nanmedian(np.abs(s[np.isfinite(s)] - med_s))) * 1.4826
+    fin = np.isfinite(s)
+    if fin.sum() >= 5:
+        local = pd.Series(s).rolling(9, center=True, min_periods=3).median().to_numpy()
+        resid = s - local
+        r = resid[np.isfinite(resid)]
+        mad_r = float(np.nanmedian(np.abs(r - np.nanmedian(r)))) * 1.4826
+        df["spread_outlier"] = np.where(np.isfinite(resid),
+                                        resid > max(3 * mad_r, 1.0), False)
     else:
-        med_s, mad_s = np.nan, np.nan   # nothing was corroborated anywhere
-    df["spread_outlier"] = (s > med_s + max(3 * mad_s, 1.0)) if np.isfinite(med_s) \
-        else np.zeros(len(df), bool)
+        df["spread_outlier"] = np.zeros(len(df), bool)
     df["broken"] = (df["tier"] == "REJECT") | df["clipped"].astype(bool).to_numpy()
     df["use"] = ~(df["broken"].to_numpy() | df["spread_outlier"].to_numpy())
 
@@ -839,7 +886,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
                 reference_row=int(ref), V0_px3=V0,
                 V0_mm3=(V0 / scale ** 3 / 1e9 if scale else np.nan),
                 trust=TRUST_METHODS, deciders=deciders, med_conf=med_conf,
-                workers=workers)
+                reject_below=reject_below, workers=workers)
     return df, info
 
 
