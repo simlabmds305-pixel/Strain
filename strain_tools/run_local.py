@@ -359,6 +359,8 @@ def main(argv=None):
                     help="do not cut silhouettes off at the mat row")
     ap.add_argument("--workers", type=int, default=None,
                     help="parallel worker processes (default: one per core)")
+    ap.add_argument("--pick-roi", action="store_true",
+                    help="drag the crop on the first image, then run with it")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -372,6 +374,22 @@ def main(argv=None):
                BASELINE=baseline, BASELINE_TUNE=a.baseline_tune,
                CLIP_AT_BASELINE=not a.no_clip, INTERVAL_S=a.interval,
                TIME_REGEX=a.time_regex)
+
+    if a.pick_roi:
+        import pick_roi
+        first = a.folder
+        if a.each:                      # pick on the first image of the first subfolder
+            subs = sorted(d.path for d in os.scandir(a.folder)
+                          if d.is_dir() and d.name != "analysis")
+            if subs:
+                first = subs[0]
+        roi = pick_roi.pick_for_folder(first, a.pattern, cfg["ROI"])
+        if roi:
+            cfg["ROI"] = roi
+            print(f"using --roi {roi[0]},{roi[1]},{roi[2]},{roi[3]}  "
+                  f"(save that flag to skip the picker next time)")
+        else:
+            print("no box drawn - using the whole frame")
 
     if a.each:
         subs = sorted(d.path for d in os.scandir(a.folder)

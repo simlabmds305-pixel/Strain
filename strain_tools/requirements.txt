@@ -1,0 +1,7 @@
+# Everything the pipeline needs. No scipy, no scikit-image.
+# opencv-python (NOT opencv-python-headless): the headless build has no window,
+# so --pick-roi could not show you the image.
+numpy>=1.22
+pandas>=1.4
+opencv-python>=4.6
+matplotlib>=3.5

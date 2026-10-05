@@ -9,9 +9,45 @@ The notebook (`../bead_volume_batch_multi_image.ipynb`) is unchanged and still
 works. This is the same physics, restructured.
 
 ```
+python run_local.py /path/to/set --pick-roi --interval 30
 python run_local.py /path/to/set --roi 1050,1950,1350,1720 --interval 30
 python run_local.py /path/to/parent --each          # every subfolder, in one go
 ```
+
+## Running it on your own machine
+
+```bash
+git clone https://github.com/simlabmds305-pixel/Strain.git
+cd Strain
+git checkout claude/bead-volume-multi-image-4b9d1q
+cd strain_tools
+pip install -r requirements.txt
+```
+
+Four packages, no scipy. If you already have the `cantilever` conda
+environment, `conda activate cantilever` then `pip install -r
+requirements.txt` into it — everything here is a subset of what that
+environment already carries.
+
+Check it works on anything you have:
+
+```bash
+python run_local.py "C:/path/to/a/set" --pick-roi --interval 30
+```
+
+`--pick-roi` opens the first image; drag a box round the bead, close the
+window, and it runs with that crop and prints the flag so you can skip the
+picker next time. Quote Windows paths — they contain backslashes and often
+spaces. Results appear in `<that folder>/analysis/`.
+
+Two platform notes:
+
+- **On Windows the parallelism needs the `if __name__ == "__main__"` guard**,
+  which `run_local.py` has. Calling `analyse_folder` directly from a Jupyter
+  notebook on Windows will hang instead, because notebooks have no such guard —
+  pass `workers=1` there, or just use the command line.
+- `--pick-roi` needs a GUI, so it will not work over plain SSH or in a headless
+  container. Everything else runs headless (matplotlib is forced to Agg).
 
 Outputs, written into `<folder>/analysis/`:
 
