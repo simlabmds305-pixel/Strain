@@ -116,6 +116,36 @@ r = bp.drying_status(t, v + rng.normal(0, 0.3, t.size))    # 6x worse than any r
 check("noise too large to judge is said so, not reported as drying",
       r["state"] == "NOISY", f"{r['state']}, rate known to {r['rate_noise']:.4f} %/min")
 
+print("\nthe mat can move -- on 88%_8hr_4 it rose 155 px; test frames like it read +5% for -30%")
+def mat_frames(ys):
+    return [{"mat_y": (None if y is None else float(y)), "mat_tilt_deg": 0.0,
+             "Y": np.arange(1000, 1700)} for y in ys]
+cfg_blue = {"BASELINE": "blue"}
+n = 60
+true = 1900 - 160 * np.arange(n) / (n - 1)
+noisy = true + np.random.default_rng(1).normal(0, 1.5, n)
+yb, src, conf, notes = bp.resolve_baseline(mat_frames(noisy), cfg_blue)
+check("a smoothly rising mat is followed frame by frame",
+      np.ndim(yb) == 1 and src.startswith("blue"), f"source {src}")
+check("...without lagging at the ends of the run",
+      np.ndim(yb) == 1 and abs(yb[0] - true[0]) < 3 and abs(yb[-1] - true[-1]) < 3,
+      f"ends off by {yb[0]-true[0]:+.1f}, {yb[-1]-true[-1]:+.1f} px" if np.ndim(yb) == 1 else "")
+bow = 1900 - 30 * np.arange(n) / (n - 1)           # inside the old 30 px "fixed" tolerance
+yb, src, _, _ = bp.resolve_baseline(mat_frames(bow), cfg_blue)
+check("a 30 px drift is not averaged into one row", np.ndim(yb) == 1, f"source {src}")
+still = 1900 + np.random.default_rng(2).normal(0, 2.0, n)   # jittery reads, mat not moving
+yb, src, _, _ = bp.resolve_baseline(mat_frames(still), cfg_blue)
+check("a mat that does not move keeps a single row", np.ndim(yb) == 0, f"source {src}")
+jumpy = 1900 + np.random.default_rng(3).choice([-80, 0, 70], n)
+yb, src, _, _ = bp.resolve_baseline(mat_frames(jumpy), cfg_blue)
+check("an edge that jumps about is still refused", src == "auto", f"source {src}")
+gaps = [None if i % 4 == 0 else y for i, y in enumerate(noisy)]
+gaps[0] = noisy[0]
+yb, src, _, _ = bp.resolve_baseline(mat_frames(gaps), cfg_blue)
+check("frames with no read take the trend, never a made-up end",
+      np.ndim(yb) == 1 and np.all(np.isfinite(yb)) and abs(yb[4] - true[4]) < 4,
+      f"frame 4 off by {yb[4]-true[4]:+.1f} px" if np.ndim(yb) == 1 else f"source {src}")
+
 print("\nconfidence thresholds must not sit where confidences cluster")
 check("the auto-baseline cap is clear of the decision gate",
       bp.AUTO_BASELINE_CONF > bp.MIN_CONF * 1.5,

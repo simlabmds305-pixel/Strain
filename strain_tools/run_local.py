@@ -358,8 +358,13 @@ def write_report(df, info, outdir):
     L.append(f"  scale             {cfg['SCALE_PX_PER_UM']} px/um"
              f"   (1 px = {1/cfg['SCALE_PX_PER_UM']:.4f} um)")
     L.append(f"  crop              {cfg['ROI'] or 'whole frame'}")
-    L.append(f"  mat row           Y = {info['baseline_y']:.0f}   "
-             f"(source: {info['baseline_source']}, confidence {info['baseline_conf']:.2f})")
+    if info.get("baseline_moving"):
+        a, b = info["baseline_range"]
+        L.append(f"  mat row           Y = {a:.0f} -> {b:.0f}, moving   "
+                 f"(source: {info['baseline_source']}, confidence {info['baseline_conf']:.2f})")
+    else:
+        L.append(f"  mat row           Y = {info['baseline_y']:.0f}   "
+                 f"(source: {info['baseline_source']}, confidence {info['baseline_conf']:.2f})")
     L.append(f"  decided by        {' + '.join(info['deciders'])}"
              + (f"   (of {' + '.join(info['trust'])})"
                 if list(info['deciders']) != list(info['trust']) else ""))

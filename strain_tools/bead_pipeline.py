@@ -308,6 +308,37 @@ def mat_line_from_chroma(sat, x_bead, y_band, chroma_step=25):
     return float(slope), float(intercept)
 
 
+def mat_edge_under_bead(sat, prof, fit, y_band, chroma_step=25, band=80):
+    """The mat's top edge in the columns UNDER the bead, as a median row.
+
+    Searched only within `band` px of the side-fitted line, so nothing on the
+    bead itself can be mistaken for it. Uses the middle 80% of the footprint;
+    the extreme columns are where the bead's blurred rim sits on the edge.
+    Returns a row in full-image coordinates, or None.
+    """
+    H, W = sat.shape
+    xl, xr = float(prof["xl"].min()), float(prof["xr"].max())
+    w = xr - xl
+    if w < 20:
+        return None
+    ys = []
+    for x in range(int(xl + 0.1 * w), int(xr - 0.1 * w), 6):
+        if x < 2 or x > W - 3:
+            continue
+        yl = fit[0] * x + fit[1]
+        a = int(max(y_band[0], yl - band))
+        b = int(min(y_band[1], yl + band))
+        if b - a < 12:
+            continue
+        col = cv2.GaussianBlur(sat[a:b, x - 2:x + 3].mean(axis=1), (1, 9), 0).ravel()
+        if col.max() - col.min() < chroma_step:
+            continue
+        ys.append(a + int(np.argmax(np.gradient(col))))
+    if len(ys) < 5:
+        return None
+    return float(np.median(ys))
+
+
 # ----------------------------------------------------------- STAGE 1: per image
 def measure_one(args):
     """Segment one image and return everything later stages need.
@@ -407,11 +438,104 @@ def _measure_one(path, cfg, want_mask=False):
             out["mat_fit"] = fit
             out["mat_y"] = fit[0] * xc + fit[1] + cfg["BASELINE_TUNE"]
             out["mat_tilt_deg"] = float(np.degrees(np.arctan(fit[0])))
+            # The line comes from the columns either side of the bead. A mat that
+            # bows (it does, on a real run) is higher under the bead than that
+            # line says, so read the edge where the bead actually sits as well:
+            # white bead -> blue mat is the same chroma step as black -> blue.
+            under = mat_edge_under_bead(sat_full, out, fit, (y0, y1))
+            if under is not None:
+                out["mat_y_line"] = out["mat_y"]
+                out["mat_y"] = under + cfg["BASELINE_TUNE"]
 
     if want_mask:
         out["mask"] = mask
         out["img"] = img
     return out
+
+
+MAT_STEADY_PX = 8.0       # a moving mat must sit this close to its own local trend
+MAT_MOVE_MIN_PX = 4.0     # a mat that moves less than this is treated as fixed
+
+
+def mat_really_moves(frames):
+    """True if the mat edge drifts by more than its reads can be trusted to.
+
+    A smooth (quadratic) curve is fitted to the whole run's reads. Its travel
+    must exceed MAT_MOVE_MIN_PX and three times its own uncertainty, so that a
+    still mat read with a few px of jitter keeps one averaged row instead of
+    having that jitter copied into every frame's base.
+    """
+    raw = np.array([f["mat_y"] for f in frames if f.get("mat_y") is not None], float)
+    n = raw.size
+    if n < 5:
+        return False
+    x = np.arange(n, dtype=float)
+    q = np.polyfit(x, raw, 2)
+    fit = np.polyval(q, x)
+    resid = raw - fit
+    sigma = 1.4826 * float(np.median(np.abs(resid - np.median(resid))))
+    travel = float(np.ptp(fit))
+    return travel > max(MAT_MOVE_MIN_PX, 3.0 * sigma * 3.0 / np.sqrt(n))
+
+
+def moving_mat(frames):
+    """A mat edge that moves during the run, one row per frame -- or None.
+
+    The mat does move on real runs (88%_8hr_4: up 155 px and bowing). Assuming
+    it could not, the old code threw the colour edge away, guessed a single row
+    from the deepest silhouette, and measured every later frame against where
+    the mat USED to be: on synthetic frames with a true -30 % that gave +5 %.
+
+    What separates a moving mat from a colour edge that is simply not the mat
+    is continuity. A mat drifts, so each frame sits within a few px of its
+    neighbours' trend; a wrong edge jumps. Required: the edge found on at least
+    60% of frames, and 80% of those within MAT_STEADY_PX of a 7-frame rolling
+    line. The row used is that local line, so one bad read cannot move a
+    frame's base; frames where no edge was found take it from their neighbours
+    (inside the measured range only, never extrapolated).
+
+    Returns (rows array, confidence, note) or None.
+    """
+    import pandas as pd
+    n = len(frames)
+    raw = np.array([f.get("mat_y", np.nan) if f.get("mat_y") is not None else np.nan
+                    for f in frames], float)
+    have = np.isfinite(raw)
+    if have.sum() < max(5, 0.6 * n):
+        return None
+    idx = np.arange(n)
+    gi = idx[have]
+    # Local trend: a straight line through the 7 nearest frames that have a
+    # read, evaluated at this frame. NOT a rolling median -- on a mat that
+    # drifts steadily a median lags at both ends of the run (4-6 px on a test
+    # set, which moved the strain by 2 points); a local line does not.
+    trend = np.full(n, np.nan)
+    for i in range(n):
+        near = gi[np.argsort(np.abs(gi - i), kind="stable")[:7]]
+        if near.size >= 3 and np.ptp(near) > 0:
+            p = np.polyfit(near, raw[near], 1)
+            trend[i] = np.polyval(p, i)
+    resid = np.abs(raw - trend)[have]
+    steady = float(np.mean(resid <= MAT_STEADY_PX))
+    if steady < 0.8:
+        return None
+    # The row used is the local line itself: it follows a drift without lag,
+    # averages a few px of read jitter instead of copying it into every frame's
+    # base, and fills frames with no read. Inside the read range only -- a
+    # frame before the first read or after the last would be an extrapolation.
+    ys = trend.copy()
+    ys[(idx < gi.min()) | (idx > gi.max())] = np.nan
+    if (~np.isfinite(ys)).any():
+        return None
+    tight = clip01(1 - float(np.std(resid)) / 15.0)
+    frac = float(have.mean())
+    conf = clip01(0.5 + 0.5 * frac) * (0.65 + 0.35 * tight)
+    note = (f"the mat MOVES during this run: its edge goes from Y = {ys[0]:.0f} to "
+            f"Y = {ys[-1]:.0f} ({ys[-1] - ys[0]:+.0f} px; range {np.ptp(ys):.0f} px). "
+            f"It drifts smoothly ({100*steady:.0f}% of frames within {MAT_STEADY_PX:.0f} px "
+            f"of the local trend), so each frame is measured to its own mat row. Read "
+            f"from the edge on {int(have.sum())} of {n} frames.")
+    return ys, conf, note
 
 
 # ------------------------------------------------- STAGE 2: baseline for the set
@@ -432,6 +556,15 @@ def resolve_baseline(frames, cfg):
 
     if want == "blue":
         found = [f["mat_y"] for f in frames if f.get("mat_y") is not None]
+        # A mat that drifts by less than the fixed-mat tolerance below used to be
+        # averaged into one row: a bow of 30 px under the bead passed as "fixed",
+        # every frame was measured to the median, and a true -30 % read -25 %.
+        # If the edge is read cleanly and moves at all, follow it frame by frame.
+        moving = moving_mat(frames) if found else None
+        if moving is not None and mat_really_moves(frames):
+            ys, conf, note = moving
+            notes.append(note)
+            return ys, "blue (per frame)", conf, notes
         if found:
             med = float(np.median(found))
             agree = [v for v in found if abs(v - med) <= 30]
@@ -455,9 +588,10 @@ def resolve_baseline(frames, cfg):
                 conf = clip01(0.5 + 0.5 * frac) * (0.65 + 0.35 * tight)
                 return float(np.median(agree)), "blue", conf, notes
             notes.append(f"the colour edge disagrees with itself: {len(found)} images gave rows "
-                         f"spanning {np.ptp(found):.0f} px. The mat cannot move, so that is not "
-                         f"the mat -- most likely it is not coloured here, or it is outside the "
-                         f"crop. Falling back to 'auto'.")
+                         f"spanning {np.ptp(found):.0f} px, and not as a smooth drift either -- "
+                         f"it jumps from frame to frame, so it is not the mat. Most likely the "
+                         f"mat is not coloured here, or it is outside the crop. Falling back "
+                         f"to 'auto'.")
         else:
             notes.append("no colour edge found for the mat (grey mat, or a greyscale image) "
                          "- falling back to 'auto'.")
@@ -1025,8 +1159,9 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # ---- stage 3: volumes, confidences, verdicts ---------------------------
     scale = cfg["SCALE_PX_PER_UM"]
     rows = []
+    per_frame = np.ndim(y_base) == 1
     for i, f in enumerate(good):
-        m = volumes_for(f, y_base, base_conf, cfg)
+        m = volumes_for(f, float(y_base[i]) if per_frame else y_base, base_conf, cfg)
         m["index"] = i
         m["image"] = f["image"]
         m["path"] = f["path"]
@@ -1150,7 +1285,13 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     if scale:
         df["a_contact_um"] = df["a_contact_px"] / scale
 
-    info = dict(cfg=cfg, baseline_y=y_base, baseline_source=src,
+    # A moving mat gives one row per frame; everything that wants "the" mat row
+    # (the report, settings.json) gets the median, and the rows themselves.
+    moving = np.ndim(y_base) == 1
+    info = dict(cfg=cfg, baseline_y=(float(np.median(y_base)) if moving else y_base),
+                baseline_moving=moving,
+                baseline_range=((float(y_base[0]), float(y_base[-1])) if moving else None),
+                baseline_source=src,
                 baseline_conf=base_conf, baseline_notes=notes,
                 failures=failures, n_input=len(paths), n_ok=len(good),
                 reference_row=int(ref),
@@ -1301,14 +1442,15 @@ def warnings_for(df, info):
             out.append(f"at the start this bead is widest {float(gap.iloc[0])*100:.0f}% above "
                        f"its contact radius, i.e. it BULGES -- its contact angle is over 90 "
                        f"degrees and the widest row is not the base. a_px tracks the bulge, "
-                       f"a_contact_px the contact line; the radial strain uses the latter.")
+                       f"a_contact_px the contact line. The radial strain uses the widest row; the summary's 'contact line' row is the contact radius.")
 
-    ywide = df["Y_widest_full"].to_numpy(float)
+    # Measured from each frame's own mat row: on a run where the mat moves, the
+    # widest row moves with it and that says nothing about the bead.
+    ywide = (df["baseline_y"] - df["Y_widest_full"]).to_numpy(float)
     if n > 2 and np.ptp(ywide) > 20:
-        out.append(f"the widest row moves {np.ptp(ywide):.0f} px across the run. With a fixed "
-                   f"camera the mat cannot move, so either the bead really is changing shape at "
-                   f"its base, or the base is being lost to shadow by a different amount in each "
-                   f"frame.")
+        out.append(f"the widest row's height above the mat changes by {np.ptp(ywide):.0f} px "
+                   f"across the run, so either the bead really is changing shape at its base, "
+                   f"or the base is being lost to shadow by a different amount in each frame.")
 
     h = df["h_px"].to_numpy(float)
     if n > 2 and np.ptp(h) == 0:

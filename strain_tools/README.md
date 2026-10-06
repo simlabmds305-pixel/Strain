@@ -227,6 +227,23 @@ does not invent anisotropy. On one built with a pinned base — true vertical
 −15.00%, true radial −6.00% — it reads −15.52% and −6.46%, both within half a
 point, and the warning fires.
 
+## A mat that moves
+
+The mat is found in every frame from its colour, in the columns beside the bead
+and directly under it. If its edge drifts during the run (on `88%_8hr_4` it
+rose 155 px and bowed upward), each frame is measured to its own mat row, and
+the summary says `mat row  Y = a -> b, moving`.
+
+The code used to assume the mat could not move. A drift over 30 px made it
+discard the colour edge and guess one row from the deepest silhouette; a drift
+under 30 px was averaged into one row. Either way every frame after the first
+was measured against where the mat used to be. On test frames with a true
+volumetric strain of -30.0 % that read **+5.0 %**; it now reads -29.0 %.
+
+A colour edge that jumps about from frame to frame (rather than drifting) is
+still refused, and a still mat whose edge reads with a few px of jitter keeps a
+single averaged row.
+
 ## Did the bead finish drying?
 
 `summary.txt` answers this on its own line, `drying`. The local drying rate is
