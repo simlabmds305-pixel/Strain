@@ -124,9 +124,11 @@ def place_end_labels(ax, items, pad_frac=0.052):
         if placed and yy - placed[-1] < pad_frac * span:
             yy = placed[-1] + pad_frac * span
         placed.append(yy)
-        ax.annotate(text, xy=(x, yy), xytext=(8, 0), textcoords="offset points",
-                    va="center", fontsize=9, color=colour, fontweight="bold",
+        ax.annotate("\u2014", xy=(x, yy), xytext=(6, 0), textcoords="offset points",
+                    va="center", fontsize=11, color=colour, fontweight="bold",
                     annotation_clip=False)
+        ax.annotate(text, xy=(x, yy), xytext=(20, 0), textcoords="offset points",
+                    va="center", fontsize=9, color=INK, annotation_clip=False)
         if abs(yy - y) > 0.004 * span:                   # nudged: show where it belongs
             ax.plot([x, x], [y, yy], lw=0.8, color=colour, alpha=0.55, zorder=1)
 
@@ -251,27 +253,46 @@ def plot_shape_strain(df, info, out):
     plt.close(fig)
 
 
+def method_strains(df):
+    """Final volumetric strain (%) by each estimator, first to last USED frame --
+    the same frames the reported strain is taken from."""
+    u = df[df["use"]] if "use" in df.columns and df["use"].any() else df
+    out = {}
+    for k in SERIES:
+        if k in u.columns and len(u) > 1:
+            v0, v1 = float(u[k].iloc[0]), float(u[k].iloc[-1])
+            out[k] = 100.0 * (v1 / v0 - 1.0) if v0 > 0 else np.nan
+    return out
+
+
 def plot_volumes(df, info, out):
-    """The four estimators over the run, direct-labelled."""
-    fig, ax = plt.subplots(figsize=(9.5, 5.2))
+    """The four estimators over the run, each labelled with its own final
+    volumetric strain, and the reported (voting) result named in the title."""
+    fig, ax = plt.subplots(figsize=(10.5, 5.4))
     t, xl, is_time = time_axis(df, info)
     unit = "mm3" if "V_disk_mm3" in df.columns else None
+    strains = method_strains(df)
+    deciders = info.get("deciders", [])
     ends = []
     for k, c in SERIES.items():
         col = f"{k}_mm3" if unit else k
         v = df[col].to_numpy(float)
-        trusted = k in info["trust"]
-        ax.plot(t, v, "-", lw=2.2 if trusted else 1.4, color=c,
-                alpha=1.0 if trusted else 0.55,
-                label=k + (" (trusted)" if trusted else ""))
-        ends.append((t[-1], v[-1], k, c))
+        votes = k in deciders
+        ax.plot(t, v, "-", lw=2.2 if votes else 1.4, color=c,
+                alpha=1.0 if votes else 0.55,
+                label=k + (" (votes)" if votes else ""))
+        s = strains.get(k, np.nan)
+        ends.append((t[-1], v[-1], f"{k}  {s:+.2f} %" if np.isfinite(s) else k, c))
 
-    tidy(ax, "Four volume estimators  (they differ only below the widest row)",
+    u = df[df["use"]] if "use" in df.columns and df["use"].any() else df
+    rep = (f"reported {u['vol_strain_pct'].iloc[-1]:+.2f} %  ({' + '.join(deciders)})"
+           if "vol_strain_pct" in u.columns and len(u) else "")
+    tidy(ax, "Volume by method, final volumetric strain at right\n" + rep,
          xl, "volume (mm$^3$)" if unit else "volume (px$^3$)")
     if is_time:
         add_image_number_axis(ax, df, t)
     span = (t.max() - t.min()) or 1.0
-    ax.set_xlim(t.min() - 0.02 * span, t.max() + 0.16 * span)
+    ax.set_xlim(t.min() - 0.02 * span, t.max() + 0.30 * span)
     # direct labels last, once the limits are final: the contrast WARN on two
     # of these four slots is relieved by a visible label, not by the legend
     place_end_labels(ax, ends)
@@ -403,6 +424,11 @@ def write_report(df, info, outdir):
         L.append(f"    final volume      {v1:.4e} px^3   =  {v1/scale**3/1e9:.4f} mm^3")
         L.append(f"    VOLUMETRIC STRAIN {u['vol_strain_pct'].iloc[-1]:+.2f} %"
                  f"   (shrinkage {u['vol_shrinkage_pct'].iloc[-1]:+.2f} %)")
+        ms = method_strains(df)
+        if ms:
+            L.append("      by method       " + "   ".join(
+                f"{k} {v:+.2f}%" + ("*" if k in info["deciders"] else "")
+                for k, v in ms.items()) + "   (* votes)")
         L.append(f"    linear strain     {u['linear_strain_pct'].iloc[-1]:+.2f} %"
                  f"   (cube root of the volume ratio)")
         if {"height_strain_pct", "radial_strain_pct"} <= set(u.columns):
