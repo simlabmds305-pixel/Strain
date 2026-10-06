@@ -338,6 +338,13 @@ def drying_lines(u, cfg):
                f"({r['rate_now']:+.3f} %/min)",
                f"                      slowest rate reached {r['min_rate']:.3f} %/min -- "
                f"the strain above is not final"]
+    elif st == "RISING":
+        out = [f"    drying            VOLUME RISING at the last frame "
+               f"({r['rate_now']:+.3f} %/min)",
+               f"                      a drying bead cannot gain volume, so the last frames "
+               f"are mis-measured --",
+               f"                      read volumes.png and the last images before trusting "
+               f"the final value"]
     elif st == "NOISY":
         out = [f"    drying            NOT JUDGED -- frames too noisy: a local rate is only "
                f"known to +/-{r['rate_noise']:.3f} %/min",

@@ -956,7 +956,7 @@ def drying_status(t_min, v_pct, window=DRY_WINDOW_MIN, rate=DRY_RATE, hold=DRY_H
     Three real runs all "plateaued" by that test; on this one only the longest
     had, and one never got below 0.028 %/min.
 
-    Returns a dict: state (DRY / LEVELLING / DRYING / NOISY / UNKNOWN),
+    Returns a dict: state (DRY / LEVELLING / DRYING / RISING / NOISY / UNKNOWN),
     onset_min, flat_for_min, rate_now (%/min, negative = losing volume),
     min_rate and rate_noise (the typical uncertainty of a local rate).
     """
@@ -1004,7 +1004,9 @@ def drying_status(t_min, v_pct, window=DRY_WINDOW_MIN, rate=DRY_RATE, hold=DRY_H
     tail_ok = np.flip(np.cumprod(np.flip(flat)).astype(bool))
     idx = np.flatnonzero(tail_ok & fin)
     if idx.size == 0:
-        res["state"] = "DRYING"
+        # A drying bead cannot gain volume. A rate that is clearly positive at
+        # the end means the last frames are mis-measured, not that it is wet.
+        res["state"] = "RISING" if res["rate_now"] > rate else "DRYING"
         return res
     i0 = int(idx[0])
     res["onset_min"] = float(t[i0])

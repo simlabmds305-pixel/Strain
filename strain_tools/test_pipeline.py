@@ -108,6 +108,9 @@ check("the same curve cut short is not", r["state"] != "DRY",
       f"{r['state']}, flat {r['flat_for_min']:.0f} min")
 check("a bead still losing water is DRYING",
       bp.drying_status(t, 100 - 0.1 * t)["state"] == "DRYING")
+check("a volume that climbs at the end is not called drying",
+      bp.drying_status(t, np.maximum(100 - 0.3 * t, 70) + np.clip(t - 110, 0, None) * 0.05)["state"]
+      == "RISING")
 rng = np.random.default_rng(0)
 r = bp.drying_status(t, v + rng.normal(0, 0.06, t.size))   # worst real run: ~0.05 %
 check("frame noise at the measured level does not hide a real plateau",
