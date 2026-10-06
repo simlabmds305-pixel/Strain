@@ -97,6 +97,25 @@ global_flags = int((s > g + max(3 * gmad, 1.0)).sum())
 check("a local test ignores the drift", local_flags == 0,
       f"local {local_flags}, a global one would flag {global_flags}")
 
+print("\ndrying -- a run stopped just after it levels off is not proven dry")
+t = np.arange(0, 140, 1.0)
+v = 100 - 40 * (1 - np.exp(-t / 15.0))               # dries out, then sits still
+r = bp.drying_status(t, v)
+check("a long flat tail is called DRY", r["state"] == "DRY",
+      f"{r['state']}, flat {r['flat_for_min']:.0f} min")
+r = bp.drying_status(t[:70], v[:70])                  # same bead, stopped at 70 min
+check("the same curve cut short is not", r["state"] != "DRY",
+      f"{r['state']}, flat {r['flat_for_min']:.0f} min")
+check("a bead still losing water is DRYING",
+      bp.drying_status(t, 100 - 0.1 * t)["state"] == "DRYING")
+rng = np.random.default_rng(0)
+r = bp.drying_status(t, v + rng.normal(0, 0.06, t.size))   # worst real run: ~0.05 %
+check("frame noise at the measured level does not hide a real plateau",
+      r["state"] == "DRY", f"{r['state']}, rate known to {r['rate_noise']:.4f} %/min")
+r = bp.drying_status(t, v + rng.normal(0, 0.3, t.size))    # 6x worse than any real run
+check("noise too large to judge is said so, not reported as drying",
+      r["state"] == "NOISY", f"{r['state']}, rate known to {r['rate_noise']:.4f} %/min")
+
 print("\nconfidence thresholds must not sit where confidences cluster")
 check("the auto-baseline cap is clear of the decision gate",
       bp.AUTO_BASELINE_CONF > bp.MIN_CONF * 1.5,

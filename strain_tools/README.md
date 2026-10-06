@@ -227,6 +227,26 @@ does not invent anisotropy. On one built with a pinned base — true vertical
 −15.00%, true radial −6.00% — it reads −15.52% and −6.46%, both within half a
 point, and the warning fires.
 
+## Did the bead finish drying?
+
+`summary.txt` answers this on its own line, `drying`. The local drying rate is
+the slope of V/V0 over the trailing 15 minutes; the bead is flat once that
+rate stays under 0.02 %/min, and **DRY** once it has stayed flat for 20 minutes.
+
+| verdict        | meaning                                                         |
+|----------------|-----------------------------------------------------------------|
+| DRY            | the strain reported is the bead's final value                   |
+| LEVELLING OFF  | flat, but not for long enough to be sure -- run it longer       |
+| STILL DRYING   | still losing water at the last frame; the strain is not final   |
+| NOT JUDGED     | frames too noisy for a 0.02 %/min rate to be told from zero     |
+
+It never compares a frame with the last frame. "Within x % of the final value"
+is circular: a run stopped soon after the curve levels off has few frames left
+to fail the test, so it passes almost for free. On the first three 88 % runs
+that test said all three had plateaued; this one says set 3 was levelling off
+(15 of the 20 minutes), set 1 had just started to (2 minutes), and set 2 never
+got below 0.028 %/min. Needs `--interval`, since it works in minutes.
+
 ## Checks and tests
 
 `python test_pipeline.py` runs the regression suite. Every test in it is a bug

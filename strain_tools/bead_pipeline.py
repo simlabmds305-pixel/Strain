@@ -803,6 +803,82 @@ def verdict_text(row):
 
 
 # ------------------------------------------------------ STAGE 4: the whole set
+DRY_WINDOW_MIN = 15.0     # trailing window the local drying rate is fitted over
+DRY_RATE = 0.02           # %/min of V0: below this the bead is losing nothing measurable
+DRY_HOLD_MIN = 20.0       # ...and it must stay below it this long to be called dry
+
+
+def drying_status(t_min, v_pct, window=DRY_WINDOW_MIN, rate=DRY_RATE, hold=DRY_HOLD_MIN):
+    """Has the bead stopped losing water, and since when?
+
+    The local drying rate at each frame is the slope of V/V0 (in %) over the
+    preceding `window` minutes. The bead counts as flat from the first frame
+    after which that rate never again exceeds `rate`, and as DRY only once it
+    has stayed flat for `hold` minutes.
+
+    This deliberately never compares a frame with the LAST frame. "Within x %
+    of the final value" is circular: a run stopped soon after the curve levels
+    off has few frames left to break the test, so it passes almost for free.
+    Three real runs all "plateaued" by that test; on this one only the longest
+    had, and one never got below 0.028 %/min.
+
+    Returns a dict: state (DRY / LEVELLING / DRYING / NOISY / UNKNOWN),
+    onset_min, flat_for_min, rate_now (%/min, negative = losing volume),
+    min_rate and rate_noise (the typical uncertainty of a local rate).
+    """
+    t = np.asarray(t_min, float)
+    v = np.asarray(v_pct, float)
+    ok = np.isfinite(t) & np.isfinite(v)
+    t, v = t[ok], v[ok]
+    res = dict(state="UNKNOWN", onset_min=np.nan, flat_for_min=0.0, rate_now=np.nan,
+               min_rate=np.nan, rate_noise=np.nan, window=window, rate=rate, hold=hold)
+    if t.size < 8:
+        return res
+    dt = float(np.median(np.diff(t))) if t.size > 1 else np.nan
+    win = max(window, 7 * dt) if np.isfinite(dt) else window   # at least 8 points
+    slope = np.full(t.size, np.nan)
+    sxx = np.full(t.size, np.nan)
+    for i in range(t.size):
+        m = (t >= t[i] - win - 1e-9) & (t <= t[i])
+        if m.sum() >= 8 and np.ptp(t[m]) > 0:
+            slope[i] = np.polyfit(t[m], v[m], 1)[0]
+            sxx[i] = float(np.sum((t[m] - t[m].mean()) ** 2))
+    fin = np.isfinite(slope)
+    if not fin.any():
+        return res
+    res["rate_now"] = float(slope[fin][-1])
+    res["min_rate"] = float(np.nanmin(np.abs(slope)))
+    # How well each local rate is known. Frame scatter is measured against a
+    # 7-frame quadratic -- short enough that the drying curve's own bend does
+    # not count as noise (a straight-line misfit over 15 min would, and calls a
+    # perfectly clean exponential "noisy"). If a rate of `rate` cannot be told
+    # from zero at this scatter, saying DRYING would be a guess.
+    r = []
+    for i in range(3, t.size - 3):
+        s = slice(i - 3, i + 4)
+        p = np.polyfit(t[s] - t[i], v[s], 2)
+        r.append(v[i] - p[-1])
+    r = np.asarray(r)
+    sigma = 1.4826 * float(np.median(np.abs(r - np.median(r)))) * np.sqrt(7 / 4)
+    res["rate_noise"] = float(sigma / np.sqrt(np.nanmedian(sxx[fin])))
+    if res["rate_noise"] > rate / 2:
+        res["state"] = "NOISY"
+        return res
+    flat = ~fin | (np.abs(slope) < rate)
+    flat[~fin] = True
+    # first index after which every measured rate stays below the threshold
+    tail_ok = np.flip(np.cumprod(np.flip(flat)).astype(bool))
+    idx = np.flatnonzero(tail_ok & fin)
+    if idx.size == 0:
+        res["state"] = "DRYING"
+        return res
+    i0 = int(idx[0])
+    res["onset_min"] = float(t[i0])
+    res["flat_for_min"] = float(t[-1] - t[i0])
+    res["state"] = "DRY" if res["flat_for_min"] >= hold else "LEVELLING"
+    return res
+
+
 def find_frozen(df, cols=("V_disk", "V_extrap"), min_run=3):
     """Runs of EXACTLY equal values in a series that physically cannot repeat.
 

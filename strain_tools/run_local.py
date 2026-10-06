@@ -312,6 +312,41 @@ def plot_agreement(df, info, out):
 
 
 # -------------------------------------------------------------------- report
+def drying_lines(u, cfg):
+    """Summary lines answering: had the bead stopped losing water?"""
+    if not cfg.get("INTERVAL_S") or cfg.get("TIME_REGEX"):
+        return ["    drying            not judged -- needs --interval to know minutes"]
+    try:
+        v = 100.0 * u["V_consensus"].to_numpy(float) / float(u["V_consensus"].iloc[0])
+        r = bp.drying_status(u["t_s"].to_numpy(float) / 60.0, v)
+    except Exception as e:                       # never let this cost the summary
+        return [f"    drying            not judged ({e})"]
+    rule = (f"(rate over the last {r['window']:.0f} min under {r['rate']} %/min, "
+            f"held {r['hold']:.0f} min)")
+    st = r["state"]
+    if st == "DRY":
+        out = [f"    drying            DRY -- flat from {r['onset_min']:.0f} min, "
+               f"held for {r['flat_for_min']:.0f} min",
+               f"                      the strain above is the bead's final value"]
+    elif st == "LEVELLING":
+        need = r["hold"] - r["flat_for_min"]
+        out = [f"    drying            LEVELLING OFF -- flat from {r['onset_min']:.0f} min, "
+               f"but only for {r['flat_for_min']:.0f} min",
+               f"                      about {need:.0f} more min would have confirmed it"]
+    elif st == "DRYING":
+        out = [f"    drying            STILL DRYING at the last frame "
+               f"({r['rate_now']:+.3f} %/min)",
+               f"                      slowest rate reached {r['min_rate']:.3f} %/min -- "
+               f"the strain above is not final"]
+    elif st == "NOISY":
+        out = [f"    drying            NOT JUDGED -- frames too noisy: a local rate is only "
+               f"known to +/-{r['rate_noise']:.3f} %/min",
+               f"                      (check the crop and the brightness plot)"]
+    else:
+        return ["    drying            not judged -- too few frames"]
+    return out + [f"                      {rule}"]
+
+
 def write_report(df, info, outdir):
     cfg = info["cfg"]
     L = []
@@ -391,6 +426,7 @@ def write_report(df, info, outdir):
                 L.append( "         them apart.")
         L.append(f"    median spread     {u['spread_pct'].median():.2f} % between "
                  f"{' and '.join(info['trust'])}")
+        L.extend(drying_lines(u, cfg))
     L.append("")
 
     for n in info["baseline_notes"]:
