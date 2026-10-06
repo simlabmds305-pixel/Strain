@@ -439,6 +439,15 @@ def write_report(df, info, outdir):
         L.append(f"    median spread     {u['spread_pct'].median():.2f} % between "
                  f"{' and '.join(info['trust'])}")
         L.extend(drying_lines(u, cfg))
+        alt = info.get("mat_alt")
+        if alt:
+            L.append(f"    moving mat        read as: {alt['chosen']}  "
+                     f"(V_extrap {alt['chosen_pct']:+.2f} %)")
+            L.append(f"                      if instead the {alt['other']}: "
+                     f"V_extrap {alt['other_pct']:+.2f} %")
+            if abs(alt["chosen_pct"] - alt["other_pct"]) > 2:
+                L.append("                      -- the reading matters here; check the mat on "
+                         "the stage (see the [baseline] notes)")
     L.append("")
 
     for n in info["baseline_notes"]:
@@ -683,6 +692,10 @@ def main(argv=None):
     ap.add_argument("--baseline", default="blue",
                     help="'blue' (read the mat off its colour), 'auto', or a row number")
     ap.add_argument("--baseline-tune", type=float, default=0.0)
+    ap.add_argument("--mat", choices=("auto", "follow", "fixed"), default="auto",
+                    help="when the mat edge moves: 'follow' if the bead rides on the mat, "
+                         "'fixed' if the edge rises in front of the bead. 'auto' (default) "
+                         "decides from whether the top of the bead moves with it.")
     ap.add_argument("--thresh-offset", type=int, default=0)
     ap.add_argument("--manual-thresh", type=int, default=None)
     ap.add_argument("--method", default="otsu", choices=["otsu", "adaptive", "edges"])
@@ -731,7 +744,7 @@ def main(argv=None):
     cfg = dict(SCALE_PX_PER_UM=a.scale, ROI=a.roi, INVERT=a.invert,
                MANUAL_THRESH=a.manual_thresh, THRESH_OFFSET=a.thresh_offset,
                SEGMENT_METHOD=a.method, MAT_CHROMA_MIN=a.chroma_min,
-               BASELINE=baseline, BASELINE_TUNE=a.baseline_tune,
+               BASELINE=baseline, BASELINE_TUNE=a.baseline_tune, MAT_MODE=a.mat,
                CLIP_AT_BASELINE=not a.no_clip, INTERVAL_S=a.interval,
                TIME_REGEX=a.time_regex)
 

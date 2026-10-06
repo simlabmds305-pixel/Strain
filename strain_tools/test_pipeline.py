@@ -120,12 +120,21 @@ check("noise too large to judge is said so, not reported as drying",
       r["state"] == "NOISY", f"{r['state']}, rate known to {r['rate_noise']:.4f} %/min")
 
 print("\nthe mat can move -- on 88%_8hr_4 it rose 155 px; test frames like it read +5% for -30%")
-def mat_frames(ys):
-    return [{"mat_y": (None if y is None else float(y)), "mat_tilt_deg": 0.0,
-             "Y": np.arange(1000, 1700)} for y in ys]
+def mat_frames(ys, ride=True):
+    """Frames whose mat edge reads `ys`. With ride=True the bead sits on the
+    mat and its top moves with it; with ride=False the top stays put."""
+    out = []
+    m = [y for y in ys if y is not None]
+    for i, y in enumerate(ys):
+        ref = m[min(i, len(m) - 1)] if y is None else y
+        apex = int(round((ref if ride else 1900) - 600 + 0.8 * i))   # + drying
+        out.append({"mat_y": (None if y is None else float(y)), "mat_tilt_deg": 0.0,
+                    "Y": np.arange(apex, apex + 500)})
+    return out
 cfg_blue = {"BASELINE": "blue"}
 n = 60
-true = 1900 - 160 * np.arange(n) / (n - 1)
+k = np.arange(n) / (n - 1)
+true = 1900 - 160 * (0.55 * np.clip((k - .12) / .13, 0, 1) + 0.45 * np.clip((k - .5) / .12, 0, 1))
 noisy = true + np.random.default_rng(1).normal(0, 1.5, n)
 yb, src, conf, notes = bp.resolve_baseline(mat_frames(noisy), cfg_blue)
 check("a smoothly rising mat is followed frame by frame",
@@ -133,7 +142,7 @@ check("a smoothly rising mat is followed frame by frame",
 check("...without lagging at the ends of the run",
       np.ndim(yb) == 1 and abs(yb[0] - true[0]) < 3 and abs(yb[-1] - true[-1]) < 3,
       f"ends off by {yb[0]-true[0]:+.1f}, {yb[-1]-true[-1]:+.1f} px" if np.ndim(yb) == 1 else "")
-bow = 1900 - 30 * np.arange(n) / (n - 1)           # inside the old 30 px "fixed" tolerance
+bow = 1900 - 30 * np.clip((k - .3) / .3, 0, 1)    # inside the old 30 px "fixed" tolerance
 yb, src, _, _ = bp.resolve_baseline(mat_frames(bow), cfg_blue)
 check("a 30 px drift is not averaged into one row", np.ndim(yb) == 1, f"source {src}")
 still = 1900 + np.random.default_rng(2).normal(0, 2.0, n)   # jittery reads, mat not moving
@@ -142,6 +151,10 @@ check("a mat that does not move keeps a single row", np.ndim(yb) == 0, f"source 
 jumpy = 1900 + np.random.default_rng(3).choice([-80, 0, 70], n)
 yb, src, _, _ = bp.resolve_baseline(mat_frames(jumpy), cfg_blue)
 check("an edge that jumps about is still refused", src == "auto", f"source {src}")
+yb, src, _, _ = bp.resolve_baseline(mat_frames(noisy, ride=False), cfg_blue)
+check("an edge rising IN FRONT of a bead that stays put is not followed (88%_8hr_1)",
+      np.ndim(yb) == 0 and "front" in src and abs(yb - true.max()) < 3,
+      f"source {src}, floor {float(np.max(yb)):.0f} vs {true.max():.0f}")
 gaps = [None if i % 4 == 0 else y for i, y in enumerate(noisy)]
 gaps[0] = noisy[0]
 yb, src, _, _ = bp.resolve_baseline(mat_frames(gaps), cfg_blue)

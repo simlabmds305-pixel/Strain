@@ -43,6 +43,7 @@ DEFAULTS = dict(
     A_METHOD="robust",
     BASELINE="blue",           # "blue" | "auto" | a number (full-image row Y)
     BASELINE_TUNE=0.0,
+    MAT_MODE="auto",          # moving mat: "follow" (bead rides on it), "fixed" (edge in front), "auto"
     CLIP_AT_BASELINE=True,
     CLIP_TOLERANCE_PX=10,
     INTERVAL_S=None,           # seconds between frames; None -> x axis is image number
@@ -455,6 +456,8 @@ def _measure_one(path, cfg, want_mask=False):
 
 MAT_STEADY_PX = 8.0       # a moving mat must sit this close to its own local trend
 MAT_MOVE_MIN_PX = 4.0     # a mat that moves less than this is treated as fixed
+MAT_FOLLOW_SE_MAX = 0.25  # above this the ride/front test cannot decide
+MAT_FIXED_GROW_MAX = 0.03 # a fixed floor that makes the bead this much taller is ruled out
 
 
 def mat_really_moves(frames):
@@ -476,6 +479,45 @@ def mat_really_moves(frames):
     sigma = 1.4826 * float(np.median(np.abs(resid - np.median(resid))))
     travel = float(np.ptp(fit))
     return travel > max(MAT_MOVE_MIN_PX, 3.0 * sigma * 3.0 / np.sqrt(n))
+
+
+def bead_follows_mat(frames, ys):
+    """Does the TOP of the bead move with the mat edge? Returns (beta, se).
+
+    A blue edge can rise for two reasons, and they need opposite handling:
+
+      - the surface under the bead rises and carries it up: everything moves
+        together, and each frame must be measured to its own mat row;
+      - the mat's front edge rises IN FRONT of the bead (it curls, or the
+        stage tilts): the bead stays put and its bottom rows are hidden.
+
+    The apex tells them apart. Its row is fitted as a smooth drying trend
+    (cubic in frame number) plus beta x the mat row: beta ~ 1 if the bead
+    rides on the mat, ~ 0 if the edge is sliding up in front of it. This
+    needs the mat to move unevenly in time -- in bursts, as it did on every
+    real run -- otherwise its motion cannot be told from the drying trend and
+    the uncertainty says so.
+
+    On 88%_8hr_1 beta was +0.14 +/- 0.07, and the measured volume lost an
+    extra 0.25 % of V0 for every px the edge rose: exactly what hiding the
+    bead's widest rows does. Following the edge there read -37.5 % for a
+    bead that had shrunk by about -23 %.
+    """
+    apex = np.array([float(f["Y"][0]) for f in frames])
+    t = np.arange(len(frames), dtype=float)
+    t = (t - t.mean()) / max(1.0, t.std())
+    X = np.column_stack([t ** k for k in range(4)] + [np.asarray(ys, float)])
+    if len(frames) < 10:
+        return np.nan, np.inf
+    coef, *_ = np.linalg.lstsq(X, apex, rcond=None)
+    r = apex - X @ coef
+    dof = max(1, len(apex) - X.shape[1])
+    try:
+        cov = (r @ r / dof) * np.linalg.inv(X.T @ X)
+        se = float(np.sqrt(max(cov[-1, -1], 0.0)))
+    except np.linalg.LinAlgError:
+        return float(coef[-1]), np.inf
+    return float(coef[-1]), se
 
 
 def moving_mat(frames):
@@ -548,6 +590,7 @@ def resolve_baseline(frames, cfg):
     honestly be used to judge how far those masks fall short of it -- the
     confidence it carries is capped accordingly.
     """
+    import pandas as pd
     notes = []
     want = cfg["BASELINE"]
 
@@ -564,7 +607,51 @@ def resolve_baseline(frames, cfg):
         if moving is not None and mat_really_moves(frames):
             ys, conf, note = moving
             notes.append(note)
-            return ys, "blue (per frame)", conf, notes
+            mode = cfg.get("MAT_MODE", "auto")
+            beta, se = bead_follows_mat(frames, ys)
+            if mode == "auto":
+                if not np.isfinite(se) or se > MAT_FOLLOW_SE_MAX:
+                    # The mat moved too evenly for the apex test. Fall back on
+                    # physics: with the floor fixed, the bead's height is just
+                    # floor - apex, and a drying bead does not grow taller. On
+                    # a bead that really rides a smoothly rising mat, assuming
+                    # the edge was in front read it 14 % TALLER and +5 % in
+                    # volume for a true -30 %.
+                    apex = np.array([float(f["Y"][0]) for f in frames])
+                    hf = pd.Series(float(np.max(ys)) - apex).rolling(
+                        5, center=True, min_periods=1).median().to_numpy()
+                    grows = float(np.max(hf) / np.median(hf[:5]) - 1.0)
+                    if grows > MAT_FIXED_GROW_MAX:
+                        mode = "follow"
+                        notes.append(
+                            f"the mat moved too evenly for the apex test ({beta:+.2f} +/- "
+                            f"{se:.2f}), but if the edge were in front of a bead that stays "
+                            f"put, that bead would have grown {100*grows:.0f}% TALLER while "
+                            f"drying -- not possible. So it rides on the mat, and each frame "
+                            f"is measured to its own mat row.")
+                    else:
+                        mode = "fixed"
+                        notes.append(
+                            f"could NOT tell whether the bead rides on the mat or the edge is "
+                            f"rising in front of it (the top of the bead follows the mat by "
+                            f"{beta:+.2f} +/- {se:.2f}: the mat moved too evenly to separate "
+                            f"from the drying, and neither reading is ruled out). Assumed: the "
+                            f"edge is in front and the bead stays put. Look at the mat; if it "
+                            f"really lifts the bead, rerun with --mat follow.")
+                else:
+                    mode = "follow" if abs(beta - 1) < abs(beta) else "fixed"
+                    notes.append(
+                        f"the top of the bead follows the mat by {beta:+.2f} +/- {se:.2f} "
+                        f"(+1 = rides on it, 0 = ignores it) -> "
+                        + ("the bead RIDES on the mat, so each frame is measured to its own "
+                           "mat row." if mode == "follow" else
+                           "the edge is rising IN FRONT of the bead and hiding its bottom. "
+                           "The bead stays where it started, so every frame is measured to "
+                           "the deepest the mat edge was seen, and the hidden rows are rebuilt "
+                           "by continuing the bead's sides down to it."))
+            if mode == "follow":
+                return ys, "blue (per frame)", conf, notes
+            return float(np.max(ys)), "blue (edge in front; bead floor fixed)", conf, notes
         if found:
             med = float(np.median(found))
             agree = [v for v in found if abs(v - med) <= 30]
@@ -1176,7 +1263,13 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
 
     # Who decides, for this run as a whole, then the per-frame verdicts.
     conf_table = {k: np.array([r[f"conf_{k}"] for r in rows], float) for k in METHODS}
-    deciders, med_conf = choose_deciders(conf_table)
+    # When the mat's front edge is hiding the bead's bottom, V_disk measures
+    # only what is visible above that edge: a lower bound by construction, not
+    # an estimate of the bead. Letting it vote blends that shortfall into the
+    # answer -- on test frames it pulled a true -30.0 % to -34.1 %.
+    front = "edge in front" in src
+    trust = tuple(k for k in TRUST_METHODS if not (front and k == "V_disk"))
+    deciders, med_conf = choose_deciders(conf_table, trust)
     best = np.array([max((r.get(f"conf_{k}", 0.0) for k in deciders), default=0.0)
                      for r in rows], float)
     reject_below = max(FRAME_REJECT_ABS, FRAME_REJECT_FRAC * float(np.nanmedian(best)))
@@ -1184,6 +1277,31 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
         m.update(verdict_for(m, deciders, med_conf, reject_below))
 
     df = pd.DataFrame(rows)
+
+    # A moving mat has two readings and the choice between them can be worth
+    # ten points of strain. Measure the run under the other one too, with the
+    # same estimator (V_extrap, which reaches the mat under both), so the
+    # summary can show how much rides on that choice.
+    mat_alt = None
+    if src.startswith("blue ("):
+        mv = moving_mat(good)
+        if mv is not None:
+            ys_all = mv[0]
+            other = float(np.max(ys_all)) if src == "blue (per frame)" else None
+            alt = []
+            for i, f in enumerate(good):
+                yb = other if other is not None else float(ys_all[i])
+                alt.append(volumes_for(f, yb, base_conf, cfg)["V_extrap"])
+            alt = np.asarray(alt, float)
+            here = df["V_extrap"].to_numpy(float)
+            if alt[0] > 0 and here[0] > 0:
+                mat_alt = dict(
+                    chosen=("bead rides on the mat" if src == "blue (per frame)"
+                            else "edge in front of the bead"),
+                    other=("edge in front of the bead" if src == "blue (per frame)"
+                           else "bead rides on the mat"),
+                    chosen_pct=100.0 * (here[-1] / here[0] - 1.0),
+                    other_pct=100.0 * (alt[-1] / alt[0] - 1.0))
 
     # ---- stage 4: outliers, quarantine, strain -----------------------------
     # Before anything can substitute a value: were any of these measured twice
@@ -1301,7 +1419,8 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
                 V0_px3=V0,
                 V0_mm3=(V0 / scale ** 3 / 1e9 if scale else np.nan),
                 frozen=frozen,
-                trust=TRUST_METHODS, deciders=deciders, med_conf=med_conf,
+                trust=trust, deciders=deciders, med_conf=med_conf, mat_front=front,
+                mat_alt=mat_alt,
                 reject_below=reject_below, workers=workers)
     return df, info
 
@@ -1340,6 +1459,20 @@ def warnings_for(df, info):
         out.append(f"{k} frame(s) had their volumes filled in from the neighbours "
                    f"after an exposure glitch; the `measured` column marks them. "
                    f"They are estimates, not measurements.")
+
+    if info.get("mat_front"):
+        hid = (df["baseline_y"] - df["Y_bottom_full"]).to_numpy(float)
+        last = df[df["use"]] if "use" in df.columns and df["use"].any() else df
+        r = last.iloc[-1]
+        agree = 100.0 * (r["V_base"] / r["V_extrap"] - 1.0) if r["V_extrap"] else np.nan
+        out.append(f"the mat's front edge hides the bottom of the bead: up to {np.nanmax(hid):.0f} px "
+                   f"of it by {df['image'].iloc[int(np.nanargmax(hid))]}. Those rows are rebuilt by "
+                   f"continuing the bead's sides down to where it sits (V_extrap); V_disk counts only "
+                   f"what is visible above the edge and does not vote. A second rebuild of the same "
+                   f"rows at constant radius (V_base) differs by {agree:+.1f} % at the last frame -- "
+                   f"that is how far the hidden band's shape is uncertain. Every verdict here is "
+                   f"SINGLE because nothing measures the hidden rows directly; taping the mat flat "
+                   f"fixes this at the source.")
 
     # A trusted estimator that was dropped for the whole run is the most
     # important thing on this list: it means nothing corroborated the answer.

@@ -229,20 +229,37 @@ point, and the warning fires.
 
 ## A mat that moves
 
-The mat is found in every frame from its colour, in the columns beside the bead
-and directly under it. If its edge drifts during the run (on `88%_8hr_4` it
-rose 155 px and bowed upward), each frame is measured to its own mat row, and
-the summary says `mat row  Y = a -> b, moving`.
+The mat is found in every frame from its colour, beside the bead and under it.
+On every real run so far but one, its edge moved during the run (up to 155 px).
+A blue edge can rise for two reasons, and they need opposite handling:
 
-The code used to assume the mat could not move. A drift over 30 px made it
-discard the colour edge and guess one row from the deepest silhouette; a drift
-under 30 px was averaged into one row. Either way every frame after the first
-was measured against where the mat used to be. On test frames with a true
-volumetric strain of -30.0 % that read **+5.0 %**; it now reads -29.0 %.
+| what is happening | how it is measured |
+|---|---|
+| the surface under the bead rises and **carries the bead up** | each frame to its own mat row |
+| the mat's **front edge rises in front of the bead** and hides its bottom | every frame to where the bead sits (the deepest the edge was seen); the hidden rows are rebuilt by continuing the bead's sides down (V_extrap), and V_disk -- which only sees what is above the edge -- does not vote |
 
-A colour edge that jumps about from frame to frame (rather than drifting) is
-still refused, and a still mat whose edge reads with a few px of jitter keeps a
-single averaged row.
+The code tells them apart from the TOP of the bead: fitted as a smooth drying
+trend plus beta x the mat row, beta is ~1 if the bead rides on the mat and ~0
+if the edge is sliding up in front of it. That needs the mat to move unevenly
+(in bursts, as it has on every real run). When it moves too evenly to tell,
+physics decides if it can -- a bead whose floor stayed put cannot grow taller
+while it dries -- and otherwise the summary says it could not tell and assumes
+the edge is in front. Override with `--mat follow` or `--mat fixed`.
+
+Either way the summary prints the strain under BOTH readings, so you can see
+how much rides on the choice.
+
+On `88%_8hr_1` beta was +0.14 +/- 0.07 and the volume lost an extra 0.25 % of V0
+for every px the edge rose -- exactly what hiding the bead's widest rows does.
+Following the edge read -37.5 %; with the floor fixed it is about -23 %.
+
+On test frames (true volumetric strain -30.0 %):
+
+| case | old code | follow every edge | now |
+|---|---|---|---|
+| bead rides a mat rising in bursts | | -29.5 % | -29.5 % |
+| edge rises in front of a still bead | | -42.4 % | -28.9 % |
+| bead rides a mat rising steadily | +5.0 % | -29.0 % | -29.0 % |
 
 ## Did the bead finish drying?
 
