@@ -575,8 +575,7 @@ def moving_mat(frames):
     note = (f"the mat MOVES during this run: its edge goes from Y = {ys[0]:.0f} to "
             f"Y = {ys[-1]:.0f} ({ys[-1] - ys[0]:+.0f} px; range {np.ptp(ys):.0f} px). "
             f"It drifts smoothly ({100*steady:.0f}% of frames within {MAT_STEADY_PX:.0f} px "
-            f"of the local trend), so each frame is measured to its own mat row. Read "
-            f"from the edge on {int(have.sum())} of {n} frames.")
+            f"of the local trend). Read from the edge on {int(have.sum())} of {n} frames.")
     return ys, conf, note
 
 
@@ -1549,12 +1548,16 @@ def warnings_for(df, info):
                    "edge is inside the box, or pass --baseline <row>.")
 
     short = df["rows_short"].to_numpy(float)
-    if n > 2 and np.ptp(short) > 10:
+    # With the mat's edge in front of the bead, masks stop short because the
+    # edge hides the base -- the front-edge note above says so. Blaming the
+    # shadow or the threshold here would send you after the wrong fix.
+    front = bool(info.get("mat_front"))
+    if n > 2 and np.ptp(short) > 10 and not front:
         out.append(f"V_disk's lower limit of integration moves {np.ptp(short):.0f} px across the "
                    f"run (masks end between {np.nanmin(short):+.0f} and {np.nanmax(short):+.0f} px "
                    f"of the mat). V_disk stops wherever the mask stops; V_extrap always reaches "
                    f"the mat.")
-    if np.nanmedian(short) > 5:
+    if np.nanmedian(short) > 5 and not front:
         out.append(f"the silhouettes stop a median of {np.nanmedian(short):.0f} px short of the "
                    f"mat (worst {np.nanmax(short):.0f} px). Those missing rows are the widest part "
                    f"of the bead, so V_disk is an underestimate by more than the row count "
@@ -1593,7 +1596,7 @@ def warnings_for(df, info):
                    "that - the apex is almost certainly the top edge of the crop.")
 
     tiers = df["tier"].value_counts().to_dict()
-    if tiers.get("CERTIFIED", 0) == 0 and n >= 3:
+    if tiers.get("CERTIFIED", 0) == 0 and n >= 3 and not front:
         out.append("no frame reached CERTIFIED: V_disk and V_extrap never agreed to within "
                    f"{100*CERT_TOL:.0f}%, which means the mask never reached the mat on its own. "
                    "The volumes still stand, but they rest on the extrapolation rather than on "

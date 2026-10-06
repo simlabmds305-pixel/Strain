@@ -436,8 +436,12 @@ def write_report(df, info, outdir):
                 L.append( "         is fully pinned (flat) or receding slowly (sloping) -- those")
                 L.append( "         are different mechanisms and this ratio alone cannot tell")
                 L.append( "         them apart.")
-        L.append(f"    median spread     {u['spread_pct'].median():.2f} % between "
-                 f"{' and '.join(info['trust'])}")
+        if len(info["deciders"]) > 1:
+            L.append(f"    median spread     {u['spread_pct'].median():.2f} % between "
+                     f"{' and '.join(info['deciders'])}")
+        else:
+            L.append(f"    median spread     none -- only {info['deciders'][0]} votes, so "
+                     f"nothing cross-checks it")
         L.extend(drying_lines(u, cfg))
         alt = info.get("mat_alt")
         if alt:
