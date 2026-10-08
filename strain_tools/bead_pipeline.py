@@ -455,8 +455,9 @@ def _measure_one(path, cfg, want_mask=False):
 
 
 MAT_STEADY_PX = 8.0       # a moving mat must sit this close to its own local trend
-MAT_MOVE_MIN_PX = 4.0     # a mat that moves less than this is treated as fixed
-MAT_FOLLOW_SE_MAX = 0.25  # above this the ride/front test cannot decide
+MAT_MOVE_MIN_PX = 10.0    # a mat that moves less than this (~40 um) is treated as fixed.
+                          # 4 px let a 7 px drift on 88%_8hr_3 -- a flat mat by any
+                          # practical measure -- take V_disk's vote and every CERTIFIED.
 MAT_FIXED_GROW_MAX = 0.03 # a fixed floor that makes the bead this much taller is ruled out
 
 
@@ -479,6 +480,19 @@ def mat_really_moves(frames):
     sigma = 1.4826 * float(np.median(np.abs(resid - np.median(resid))))
     travel = float(np.ptp(fit))
     return travel > max(MAT_MOVE_MIN_PX, 3.0 * sigma * 3.0 / np.sqrt(n))
+
+
+def mat_reading(beta, se):
+    """'follow', 'fixed', or None when the apex test cannot decide.
+
+    Decided when beta sits clearly on one side of 0.5 -- halfway between
+    riding (1) and ignoring (0) -- by more than twice its uncertainty. An
+    absolute limit on the uncertainty instead left 88%_8hr_2 undecided at
+    -1.00 +/- 0.26, which is eight uncertainties away from riding.
+    """
+    if not np.isfinite(beta) or not np.isfinite(se) or abs(beta - 0.5) <= 2.0 * se:
+        return None
+    return "follow" if beta > 0.5 else "fixed"
 
 
 def bead_follows_mat(frames, ys):
@@ -609,7 +623,7 @@ def resolve_baseline(frames, cfg):
             mode = cfg.get("MAT_MODE", "auto")
             beta, se = bead_follows_mat(frames, ys)
             if mode == "auto":
-                if not np.isfinite(se) or se > MAT_FOLLOW_SE_MAX:
+                if mat_reading(beta, se) is None:
                     # The mat moved too evenly for the apex test. Fall back on
                     # physics: with the floor fixed, the bead's height is just
                     # floor - apex, and a drying bead does not grow taller. On
@@ -638,7 +652,7 @@ def resolve_baseline(frames, cfg):
                             f"edge is in front and the bead stays put. Look at the mat; if it "
                             f"really lifts the bead, rerun with --mat follow.")
                 else:
-                    mode = "follow" if abs(beta - 1) < abs(beta) else "fixed"
+                    mode = mat_reading(beta, se)
                     notes.append(
                         f"the top of the bead follows the mat by {beta:+.2f} +/- {se:.2f} "
                         f"(+1 = rides on it, 0 = ignores it) -> "

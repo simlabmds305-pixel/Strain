@@ -155,6 +155,15 @@ yb, src, _, _ = bp.resolve_baseline(mat_frames(noisy, ride=False), cfg_blue)
 check("an edge rising IN FRONT of a bead that stays put is not followed (88%_8hr_1)",
       np.ndim(yb) == 0 and "front" in src and abs(yb - true.max()) < 3,
       f"source {src}, floor {float(np.max(yb)):.0f} vs {true.max():.0f}")
+small = 1900 - 7 * k + np.random.default_rng(4).normal(0, 0.8, n)   # 88%_8hr_3: 7 px
+yb, src, _, _ = bp.resolve_baseline(mat_frames(small, ride=False), cfg_blue)
+check("a 7 px drift is a flat mat: one row, V_disk keeps its vote (88%_8hr_3)",
+      np.ndim(yb) == 0 and "front" not in src, f"source {src}")
+check("the apex test decides the real runs",
+      bp.mat_reading(-1.00, 0.26) == "fixed" and bp.mat_reading(0.15, 0.07) == "fixed"
+      and bp.mat_reading(-0.37, 0.05) == "fixed" and bp.mat_reading(1.20, 0.03) == "follow"
+      and bp.mat_reading(0.6, 0.4) is None,
+      "set 2 -1.00+/-0.26, set 1 +0.15, set 4 -0.37, riding +1.20, unclear +0.6+/-0.4")
 gaps = [None if i % 4 == 0 else y for i, y in enumerate(noisy)]
 gaps[0] = noisy[0]
 yb, src, _, _ = bp.resolve_baseline(mat_frames(gaps), cfg_blue)
