@@ -388,7 +388,9 @@ def write_report(df, info, outdir):
     L.append(f"  crop              {cfg['ROI'] or 'whole frame'}")
     if info.get("baseline_moving"):
         a, b = info["baseline_range"]
-        L.append(f"  mat row           Y = {a:.0f} -> {b:.0f}, moving   "
+        L.append(f"  mat row           Y = {a:.0f} -> {b:.0f}, "
+                 + ("each photo its own" if "each photo" in info["baseline_source"]
+                    else "moving") + "   "
                  f"(source: {info['baseline_source']}, confidence {info['baseline_conf']:.2f})")
     else:
         L.append(f"  mat row           Y = {info['baseline_y']:.0f}   "
@@ -475,6 +477,11 @@ def write_report(df, info, outdir):
                      f"(V_extrap {alt['chosen_pct']:+.2f} %)")
             L.append(f"                      if instead the {alt['other']}: "
                      f"V_extrap {alt['other_pct']:+.2f} %")
+            if alt.get("travel_px", 0) >= MAT_PAIR_PX:
+                L.append(f"                      the mat moved {alt['travel_px']:.0f} px: for an "
+                         f"exact value measure two photos with")
+                L.append( "                      the mat flat (the prompt after this run, or "
+                          "--pair INITIAL FINAL)")
             if abs(alt["chosen_pct"] - alt["other_pct"]) > 2:
                 L.append("                      -- the reading matters here; check the mat on "
                          "the stage (see the [baseline] notes)")
@@ -581,6 +588,165 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="an
     if not quiet:
         print(report + timing)
     return df, info
+
+
+# ------------------------------------------------------------ two-photo pair
+# When the mat moves a lot, part of the bead is hidden behind its edge and the
+# tracked strain rests on a rebuild of the hidden band. Two photos in which the
+# mat is flat -- the first one, and one taken at the end after pressing the mat
+# flat -- measure the whole bead directly. The tracked run is kept as it is;
+# the pair goes into its own folder beside it.
+MAT_PAIR_PX = 20.0   # mat travel (px, ~80 um) at which the pair is offered
+
+
+def mat_moved_a_lot(info):
+    alt = info.get("mat_alt")
+    return bool(alt) and alt.get("travel_px", 0.0) >= MAT_PAIR_PX
+
+
+def choose_image(title, start=None):
+    """One image file, from a dialog, falling back to a typed path."""
+    print(f"  {title} - a file picker is opening (check the taskbar / Alt+Tab)",
+          flush=True)
+    try:
+        from tkinter import filedialog
+        root = _tk_root()
+        try:
+            p = filedialog.askopenfilename(
+                title=title, parent=root,
+                initialdir=start if start and os.path.isdir(start) else os.path.expanduser("~"),
+                filetypes=[("images", "*.png *.tif *.tiff *.jpg *.jpeg *.bmp"),
+                           ("all files", "*.*")])
+        finally:
+            root.destroy()
+        if p:
+            return p
+        print("  nothing chosen in the picker.")
+    except Exception as e:
+        print(f"  the file picker could not open ({type(e).__name__}: {e}).")
+    p = _ask_console("  type or paste the image path, then Enter (blank to skip):\n  image> ")
+    return p or None
+
+
+def _ask_yes(prompt, default=True):
+    raw = _ask_console(prompt).lower()
+    return default if not raw else raw.startswith("y")
+
+
+def plot_pair(paths, cfg, df, out):
+    """Both photos side by side, with the outline that was measured and the mat
+    row it was measured to -- so a tilted bead or a missed edge is visible."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5.2))
+    for ax, p, (_, row) in zip(axes, paths, df.iterrows()):
+        m = bp.measure_one((p, cfg, True))
+        if not m.get("ok"):
+            ax.set_title(f"{os.path.basename(p)}: {m.get('error', 'failed')}", fontsize=9)
+            ax.axis("off")
+            continue
+        x0, x1, y0, y1 = m["roi"]
+        ax.imshow(m["img"], cmap="gray", extent=(x0, x1, y1, y0))
+        ax.contour(np.arange(x0, x0 + m["mask"].shape[1]),
+                   np.arange(y0, y0 + m["mask"].shape[0]), m["mask"] > 0,
+                   levels=[0.5], colors=[SERIES["V_extrap"]], linewidths=1.2)
+        ax.axhline(row["baseline_y"], color=SERIES["V_disk"], lw=1.2, ls="--")
+        ax.set_title(f"{os.path.basename(p)}\nvolume {row.get('V_consensus_mm3', np.nan):.3f} mm$^3$"
+                     f"   mat row Y = {row['baseline_y']:.0f}", fontsize=9, color=INK)
+        ax.set_xticks([]); ax.set_yticks([])
+    fig.suptitle("Two-photo measurement: outline measured (solid) and mat row (dashed)",
+                 fontsize=11, color=INK)
+    fig.tight_layout()
+    save_fig(fig, out)
+    plt.close(fig)
+
+
+def run_pair(paths, cfg, outdir, quiet=False):
+    """Measure two chosen photos on their own and save the result in outdir."""
+    cfg2 = dict(cfg, PAIR_MODE=True, INTERVAL_S=None, TIME_REGEX=None)
+    df, info = bp.analyse_folder(list(paths), cfg2, workers=2)
+    if "V_consensus" in df.columns and cfg2.get("SCALE_PX_PER_UM"):
+        df["V_consensus_mm3"] = df["V_consensus"] / cfg2["SCALE_PX_PER_UM"] ** 3 / 1e9
+    os.makedirs(outdir, exist_ok=True)
+    df.to_csv(os.path.join(outdir, "per_image.csv"), index=False)
+    head = ("  TWO-PHOTO MEASUREMENT\n"
+            f"    initial  {paths[0]}\n"
+            f"    final    {paths[1]}\n"
+            "  Chosen by hand because the mat moved during the tracked run. Each\n"
+            "  photo is measured to its own mat edge, so nothing here is rebuilt.\n"
+            "  The tracked run's own results are unchanged, in the folder beside this.\n\n")
+    report = write_report(df, info, outdir)
+    with open(os.path.join(outdir, "summary.txt"), "w") as f:
+        f.write(head + report)
+    try:
+        plot_pair(paths, info["cfg"], df, os.path.join(outdir, "pair.png"))
+    except Exception as e:
+        with open(os.path.join(outdir, "summary.txt"), "a") as f:
+            f.write(f"\n  pair.png would not save: {type(e).__name__}: {e}\n")
+    with open(os.path.join(outdir, "settings.json"), "w") as f:
+        json.dump({k: (list(v) if isinstance(v, tuple) else v)
+                   for k, v in info["cfg"].items()}, f, indent=2)
+    if not quiet:
+        print(head + report)
+    return df, info
+
+
+def offer_pair(folder, info, cfg, out_name, pair=None, ask=True, quiet=False):
+    """After a tracked run: if the mat moved a lot, say so and measure two photos.
+
+    `pair` given (from --pair) skips the questions. Otherwise asks, when there
+    is someone at the console to answer."""
+    if pair is None:
+        if not mat_moved_a_lot(info):
+            return
+        alt = info["mat_alt"]
+        print("\n" + "!" * 72)
+        print(f"  THE MAT MOVED {alt['travel_px']:.0f} px during this run, so part of the "
+              f"bead was hidden\n  and the tracked strain ({alt['chosen_pct']:+.2f} %) rests "
+              f"partly on a rebuild.\n  For an exact value, measure two photos where the mat "
+              f"is flat: the first\n  image, and a final one (for example taken after "
+              f"pressing the mat flat).")
+        print("!" * 72)
+        if not ask or not sys.stdin or not sys.stdin.isatty():
+            print("  (run again with --pair <initial> <final> to do this)")
+            return
+        if not _ask_yes("  Choose the two photos now? [Y/n] "):
+            return
+        first = choose_image("Choose the INITIAL image (mat flat)", folder)
+        if not first:
+            return
+        last = choose_image("Choose the FINAL image (mat flat)", folder)
+        if not last:
+            return
+        pair = (first, last)
+        if cfg.get("ROI") and not _ask_yes(
+                "  Use the same crop as the tracked run? (say n if the bead moved "
+                "when you flattened the mat) [Y/n] "):
+            import pick_roi
+            try:
+                cfg = dict(cfg, ROI=pick_roi.pick(pair[1], cfg["ROI"]) or cfg["ROI"])
+            except Exception as e:
+                print(f"  the crop picker could not open ({e}); keeping the run's crop")
+    missing = [p for p in pair if not os.path.isfile(p)]
+    if missing:
+        print(f"  not found: {', '.join(missing)} - pair skipped")
+        return
+    pdir = os.path.join(folder, (out_name or "analysis") + "_pair")
+    print(f"\n######  two-photo measurement -> {pdir}")
+    try:
+        dfp, infop = run_pair(pair, cfg, pdir, quiet)
+    except Exception as e:
+        print(f"  pair FAILED: {type(e).__name__}: {e}")
+        return
+    u = dfp[dfp["use"]] if dfp["use"].any() else dfp
+    line = (f"\n  TWO-PHOTO RESULT  {os.path.basename(pair[0])} -> {os.path.basename(pair[1])}: "
+            f"volumetric strain {u['vol_strain_pct'].iloc[-1]:+.2f} %"
+            f"  (full result in {os.path.basename(pdir)}/summary.txt)\n")
+    main_summary = os.path.join(folder, out_name or "analysis", "summary.txt")
+    try:
+        with open(main_summary, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+    print(line)
 
 
 # ------------------------------------------------------------- interactive
@@ -745,6 +911,12 @@ def main(argv=None):
                          "(default 'analysis'). Use a different one to compare "
                          "settings without overwriting a good result.")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--pair", nargs=2, metavar=("INITIAL", "FINAL"), default=None,
+                    help="also measure these two photos on their own (e.g. the first "
+                         "image and one taken after pressing the mat flat); saved in "
+                         "<out>_pair beside the tracked results")
+    ap.add_argument("--no-pair", action="store_true",
+                    help="do not offer the two-photo measurement when the mat moves")
     a = ap.parse_args(argv)
     cfgsave = load_settings()
 
@@ -826,7 +998,9 @@ def main(argv=None):
             elif shared is not None:
                 cfg_sub["ROI"] = shared
             try:
-                run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet, a.out)
+                _, info_sub = run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet, a.out)
+                if not a.no_pair:
+                    offer_pair(sub, info_sub, cfg_sub, a.out, ask=True, quiet=a.quiet)
             except SystemExit as e:
                 print(f"  skipped: {e}")
             except Exception as e:
@@ -837,7 +1011,9 @@ def main(argv=None):
             cfg["ROI"] = ask_roi(a.folder, seed)
         save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
                            roi=list(cfg["ROI"]) if cfg["ROI"] else None))
-        run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out)
+        _, info = run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out)
+        if a.pair or not a.no_pair:
+            offer_pair(a.folder, info, cfg, a.out, pair=a.pair, quiet=a.quiet)
 
 
 if __name__ == "__main__":

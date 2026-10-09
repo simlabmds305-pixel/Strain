@@ -164,6 +164,10 @@ check("the apex test decides the real runs",
       and bp.mat_reading(-0.37, 0.05) == "fixed" and bp.mat_reading(1.20, 0.03) == "follow"
       and bp.mat_reading(0.6, 0.4) is None,
       "set 2 -1.00+/-0.26, set 1 +0.15, set 4 -0.37, riding +1.20, unclear +0.6+/-0.4")
+yb, src, _, _ = bp.resolve_baseline(mat_frames([1971.0, 1899.0], ride=False),
+                                    dict(cfg_blue, PAIR_MODE=True))
+check("two hand-picked photos are each measured to their own mat edge",
+      np.ndim(yb) == 1 and list(yb) == [1971.0, 1899.0], f"source {src}")
 gaps = [None if i % 4 == 0 else y for i, y in enumerate(noisy)]
 gaps[0] = noisy[0]
 yb, src, _, _ = bp.resolve_baseline(mat_frames(gaps), cfg_blue)

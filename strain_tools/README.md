@@ -261,6 +261,29 @@ On test frames (true volumetric strain -30.0 %):
 | edge rises in front of a still bead | | -42.4 % | -28.9 % |
 | bead rides a mat rising steadily | +5.0 % | -29.0 % | -29.0 % |
 
+## Two-photo measurement when the mat moves
+
+The tracked run is always done and saved as before (`analysis/`). If the mat
+moved 20 px (~80 um) or more, part of the bead was hidden behind its edge, so
+the run then says so and asks for two photos in which the mat is flat:
+
+1. the INITIAL image (normally the first one of the run), and
+2. a FINAL image -- for example one taken after the bead is dry and the mat
+   has been pressed flat (same zoom, same focus, stage not moved).
+
+Those two are measured on their own, each to its own mat edge, with nothing
+rebuilt, and saved beside the tracked results in `analysis_pair/`:
+`summary.txt`, `per_image.csv`, `settings.json` and `pair.png` (both photos
+with the outline measured and the mat row it was measured to -- check the bead
+did not tilt). The tracked `summary.txt` gets a line with the two-photo result.
+
+Without the prompt: `python run_local.py <folder> --pair INITIAL FINAL`.
+To never be asked: `--no-pair`.
+
+On test frames where the mat edge rose 73 px in front of the bead (true
+volumetric strain -29.99 %), the tracked run read -28.85 %; the two-photo
+measurement read -29.95 %, both photos CERTIFIED.
+
 ## Did the bead finish drying?
 
 `summary.txt` answers this on its own line, `drying`. The local drying rate is

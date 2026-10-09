@@ -610,6 +610,20 @@ def resolve_baseline(frames, cfg):
     if want not in ("blue", "auto", None):
         return float(want), "given", 1.0, notes
 
+    if want == "blue" and cfg.get("PAIR_MODE"):
+        # Two photos chosen by hand because the mat is flat in both. Each is
+        # measured to its own mat edge: the mat may sit at a different row in
+        # the final photo (it was pressed flat), and with two frames there is
+        # no trend to smooth against or test the bead against.
+        rows = [f.get("mat_y") for f in frames]
+        if all(r is not None for r in rows):
+            notes.append("pair mode: each photo is measured to its own mat edge -- "
+                         + ", ".join(f"{f.get('image', '?')} Y = {r:.0f}"
+                                     for f, r in zip(frames, rows)))
+            return np.asarray(rows, float), "blue (each photo's own mat edge)", 0.95, notes
+        notes.append("pair mode: the mat edge was not found in every photo -- crop so "
+                     "some blue mat shows either side of the bead. Falling back.")
+
     if want == "blue":
         found = [f["mat_y"] for f in frames if f.get("mat_y") is not None]
         # A mat that drifts by less than the fixed-mat tolerance below used to be
@@ -1296,7 +1310,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # same estimator (V_extrap, which reaches the mat under both), so the
     # summary can show how much rides on that choice.
     mat_alt = None
-    if src.startswith("blue ("):
+    if src.startswith("blue (") and not cfg.get("PAIR_MODE"):
         mv = moving_mat(good)
         if mv is not None:
             ys_all = mv[0]
@@ -1309,6 +1323,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
             here = df["V_extrap"].to_numpy(float)
             if alt[0] > 0 and here[0] > 0:
                 mat_alt = dict(
+                    travel_px=float(np.ptp(ys_all)),
                     chosen=("bead rides on the mat" if src == "blue (per frame)"
                             else "edge in front of the bead"),
                     other=("edge in front of the bead" if src == "blue (per frame)"
