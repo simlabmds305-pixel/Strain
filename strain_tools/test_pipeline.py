@@ -168,6 +168,16 @@ yb, src, _, _ = bp.resolve_baseline(mat_frames([1971.0, 1899.0], ride=False),
                                     dict(cfg_blue, PAIR_MODE=True))
 check("two hand-picked photos are each measured to their own mat edge",
       np.ndim(yb) == 1 and list(yb) == [1971.0, 1899.0], f"source {src}")
+yb, src, _, _ = bp.resolve_baseline(mat_frames([1971.0, 1899.0], ride=False),
+                                    dict(cfg_blue, PAIR_MODE=True,
+                                         PAIR_BASELINES=[1971.0, 1971.0]))
+check("a time-lapse frame in first + last keeps the time-lapse's floor",
+      np.ndim(yb) == 1 and list(yb) == [1971.0, 1971.0], f"got {yb}")
+yb, src, _, _ = bp.resolve_baseline(mat_frames([1971.0, 1899.0], ride=False),
+                                    dict(cfg_blue, PAIR_MODE=True,
+                                         PAIR_BASELINES=[1971.0, None]))
+check("...while a separate final photo is measured to its own mat edge",
+      np.ndim(yb) == 1 and list(yb) == [1971.0, 1899.0], f"got {yb}")
 gaps = [None if i % 4 == 0 else y for i, y in enumerate(noisy)]
 gaps[0] = noisy[0]
 yb, src, _, _ = bp.resolve_baseline(mat_frames(gaps), cfg_blue)

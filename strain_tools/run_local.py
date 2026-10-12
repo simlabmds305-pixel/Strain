@@ -284,15 +284,22 @@ def method_table(df, info, scale):
         out[k] = dict(v0=v0 * to_mm3, v1=v1 * to_mm3,
                       strain=100.0 * (v1 / v0 - 1.0) if v0 > 0 else np.nan,
                       conf=float(info["med_conf"].get(k, np.nan)),
-                      votes=k in info["deciders"])
+                      votes=k in info["deciders"],
+                      trusted=k in info.get("trust", BOTH))
     return out
 
 
 def method_lines(tab, indent="     "):
     L = []
     for k, r in tab.items():
-        why = ("<- used" if r["votes"] else
-               f"not voting (confidence {r['conf']:.2f} < {bp.MIN_CONF})")
+        if r["votes"]:
+            why = "<- used"
+        elif r["conf"] < bp.MIN_CONF:
+            why = f"not voting (confidence {r['conf']:.2f} < {bp.MIN_CONF})"
+        elif not r["trusted"]:
+            why = "not voting (mat edge in front of the bead: counts only what shows above it)"
+        else:
+            why = "not voting (same method as the time-lapse)"
         L.append(f"{indent}{k:<9s} {r['v0']:8.3f} -> {r['v1']:8.3f} mm^3   "
                  f"{r['strain']:+7.2f} %   conf {r['conf']:.2f}  {why}")
     return L
@@ -879,22 +886,27 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
         last = info["final_photo"] or info["series"][-1]
         pdir = outdir + "_pair"
         why = ("  The first and the last image of the folder, measured on their own with the\n"
-               "  same crop as the time-lapse.")
+               "  same crop as the time-lapse. A photo that is also a time-lapse frame uses\n"
+               "  the same mat floor as the time-lapse; a separate final photo is measured\n"
+               "  to its own mat edge. Both use the time-lapse's voting method(s).")
+        floor = dict(zip(df["image"], df["baseline_y"]))
+        cfg_pair = dict(cfg,
+                        PAIR_BASELINES=[floor.get(os.path.basename(first)),
+                                        None if info["final_photo"]
+                                        else floor.get(os.path.basename(last))],
+                        FORCE_DECIDERS=list(info["deciders"]),
+                        FORCE_WEIGHTS=dict(info["med_conf"]))
         try:
-            dfp, infop = run_pair((first, last), cfg, pdir, quiet=True, why=why)
+            dfp, infop = run_pair((first, last), cfg_pair, pdir, quiet=True, why=why)
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
                         strain=float(dfp["vol_strain_pct"].iloc[-1]),
                         v0_mm3=float(dfp["V_consensus_mm3"].iloc[0]),
                         v1_mm3=float(dfp["V_consensus_mm3"].iloc[-1]),
                         ok=bool(dfp["use"].all()),
                         methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"]))
-            # Without a separate final photo the "last" image is the last
-            # time-lapse frame, and if the mat edge has risen by then it hides
-            # the bead's bottom: measured to that edge the final volume is too
-            # small and the strain too large (88%_8hr_7: -42 % against -31 %).
-            mr = res["mat_rise"]
-            if info["final_photo"] is None and mr and mr["rise_px"] >= MAT_PAIR_PX:
-                pair["hidden_px"] = mr["rise_px"]
+            # Without a separate final photo both ends are time-lapse frames,
+            # measured exactly as in step 1, so step 3 can only repeat it.
+            pair["same_as_series"] = info["final_photo"] is None
             res["pairdir"] = pdir
         except Exception as e:
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
@@ -943,12 +955,10 @@ def results_text(res):
               f"     (full detail: {os.path.basename(res['pairdir'] or '')}/summary.txt, pair.png)"]
         if not p["ok"]:
             L += ["     WARNING: one of the two photos was marked broken - look at pair.png"]
-        if p.get("hidden_px"):
-            L += [f"     WARNING: the last image is the last time-lapse frame, and by then the",
-                  f"     mat edge had risen {p['hidden_px']:.0f} px and hides the bottom of the "
-                  f"bead. The final",
-                  "     volume is measured only above that edge, so this strain is TOO LARGE.",
-                  "     For a true first + last value, end the run with a photo taken after",
+        if p.get("same_as_series"):
+            L += ["     NOTE: there is no separate final photo, so both images are time-lapse",
+                  "     frames measured exactly as in step 1 -- this repeats step 1 and is not",
+                  "     an independent check. For one, end the run with a photo taken after",
                   "     pressing the mat flat, and tick 'last image is the final photo'."]
     return "\n".join(L) + "\n"
 

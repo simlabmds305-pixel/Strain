@@ -677,6 +677,12 @@ def resolve_baseline(frames, cfg):
         # the final photo (it was pressed flat), and with two frames there is
         # no trend to smooth against or test the bead against.
         rows = [f.get("mat_y") for f in frames]
+        # A photo that is also a frame of the time-lapse is measured to the
+        # floor the time-lapse used for it, so one image gives one volume
+        # whichever result it appears in.  Only a separate final photo is
+        # measured to its own mat edge.
+        given = cfg.get("PAIR_BASELINES") or [None] * len(rows)
+        rows = [g if g is not None else r for g, r in zip(given, rows)]
         if all(r is not None for r in rows):
             notes.append("pair mode: each photo is measured to its own mat edge -- "
                          + ", ".join(f"{f.get('image', '?')} Y = {r:.0f}"
@@ -1368,6 +1374,13 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     front = "edge in front" in src
     trust = tuple(k for k in TRUST_METHODS if not (front and k == "V_disk"))
     deciders, med_conf = choose_deciders(conf_table, trust)
+    if cfg.get("FORCE_DECIDERS"):
+        # first + last after a time-lapse: vote with the same estimators and
+        # weights as the time-lapse did, so both ends use the same method
+        deciders = [k for k in cfg["FORCE_DECIDERS"] if k in METHODS] or deciders
+        if cfg.get("FORCE_WEIGHTS"):
+            med_conf = dict(med_conf, **{k: float(v) for k, v in cfg["FORCE_WEIGHTS"].items()
+                                         if k in METHODS})
     best = np.array([max((r.get(f"conf_{k}", 0.0) for k in deciders), default=0.0)
                      for r in rows], float)
     reject_below = max(FRAME_REJECT_ABS, FRAME_REJECT_FRAC * float(np.nanmedian(best)))
