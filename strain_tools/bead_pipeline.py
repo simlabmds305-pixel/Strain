@@ -208,6 +208,65 @@ def profile_from_mask(mask):
     return idx, widths, lefts.astype(int), rights.astype(int), counts.astype(int)
 
 
+LEAK_ZONE = 0.25    # a side touch in the bottom quarter of the silhouette is mat, not bead
+LEAK_FIT = 0.15     # rows just above that zone that show where each side is heading
+LEAK_MARGIN = 0.01  # of the bead's width: room left for the foot to flare past that line
+
+
+def trim_foot_leak(mask):
+    """Cut a strip of wet, shiny mat off the bead's foot.
+
+    While the mat is still wet its surface can be as bright as the bead, and
+    the silhouette then runs from the contact line sideways along the mat to
+    the edge of the crop (88%_8hr_7 Image_015, 88%_8hr_8 Image_136).  The bead
+    itself is outlined correctly; only the strip is wrong.  On each side that
+    reaches the crop edge in the bottom quarter, the side is continued straight
+    down from the rows just above, and whatever sticks out past that line is
+    cut away -- the strip can climb the slanted mat gradually, so a single jump
+    is not enough to find it.  A side touch high up is the bead itself, which
+    this leaves alone: the crop is the user's choice.
+
+    Returns (mask, rows_trimmed).
+    """
+    pr = profile_from_mask(mask)
+    if pr is None:
+        return mask, 0
+    rows, widths, lefts, rights, _ = pr
+    n, w = len(rows), mask.shape[1]
+    z0 = int((1 - LEAK_ZONE) * n)
+    f0 = max(0, z0 - max(5, int(LEAK_FIT * n)))
+    if z0 - f0 < 5:
+        return mask, 0
+    pad = max(3.0, LEAK_MARGIN * float(widths[:z0].max()))
+    out, first = mask, n
+    fy = rows[f0:z0].astype(float)
+    for side, edge, at_edge in (("left", lefts, lefts[z0:] == 0),
+                                ("right", rights, rights[z0:] == w - 1)):
+        if not at_edge.any():
+            continue
+        # the side continued straight down from where it was still bead
+        slope, icpt = np.polyfit(fy, edge[f0:z0].astype(float), 1)
+        if out is mask:
+            out = mask.copy()
+        for i in range(z0, n):
+            y = int(rows[i])
+            x = slope * y + icpt
+            if side == "left" and edge[i] < x - pad:
+                out[y, :max(0, int(math.floor(x - pad)))] = 0
+                first = min(first, i)
+            elif side == "right" and edge[i] > x + pad:
+                out[y, min(w, int(math.ceil(x + pad)) + 1):] = 0
+                first = min(first, i)
+    if out is mask or first == n:
+        return mask, 0
+    # the cut can leave a detached sliver of strip; keep the bead's own blob
+    n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(out, connectivity=8)
+    if n_lab > 2:
+        big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        out = np.uint8(labels == big) * 255
+    return out, int(n - first)
+
+
 def mask_quality(mask, ref_area=None):
     """How much does this blob look like a bead sitting on the bottom of the crop?"""
     h, w = mask.shape
@@ -401,6 +460,7 @@ def _measure_one(path, cfg, want_mask=False):
 
     mask = clean_mask(mask, close_px=cfg["CLOSE_PX"], fill_holes=cfg["FILL_HOLES"])
     mask = pick_blob(mask, cfg["BLOB_CHOICE"])
+    mask, leak_rows = trim_foot_leak(mask)
 
     pr = profile_from_mask(mask)
     if pr is None:
@@ -417,6 +477,7 @@ def _measure_one(path, cfg, want_mask=False):
         "roi": (x0, x1, y0, y1), "frame_w": W, "frame_h": H,
         "brightness": brightness,
         "clipped": clipped,
+        "leak_rows": leak_rows,
         "touches_roi_bottom": bool(rows[-1] == mh - 1),
         # profile in FULL-image coordinates, so every later stage is frame-absolute
         "Y": (rows + y0).astype(np.int32),
@@ -943,8 +1004,10 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
         sound = 0.5 * clip01(1 - fill / (FILL_EXTRAP * h_px))   # unscored: half credit
     c_extrap = blend(inv_ex, sound)
 
-    # A silhouette cut off by the crop is a property of the crop, not the bead.
-    penalty = 0.3 if frame.get("clipped") else 1.0
+    # A silhouette that touches the crop edge is NOT marked down: the crop is
+    # drawn by hand round the bead, and mat strips at the foot are already cut
+    # off (trim_foot_leak).  The report still warns about any touch.
+    penalty = 1.0
 
     # Everything that compares the mask to the mat inherits the mat row's own
     # confidence.  V_trunc alone does not -- it never uses the baseline.
@@ -1254,11 +1317,17 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
         workers = min(len(jobs), os.cpu_count() or 1)
     if workers > 1 and len(jobs) > 1:
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            frames = list(ex.map(measure_one, jobs, chunksize=1))
+            frames = []
+            for f in ex.map(measure_one, jobs, chunksize=1):
+                frames.append(f)
+                if progress:
+                    progress(len(frames), len(jobs))
     else:
-        frames = [measure_one(j) for j in jobs]
-    if progress:
-        progress(len(frames), len(frames))
+        frames = []
+        for j in jobs:
+            frames.append(measure_one(j))
+            if progress:
+                progress(len(frames), len(jobs))
 
     failures = [(f["path"], f["error"]) for f in frames if not f["ok"]]
     good = [f for f in frames if f["ok"]]
@@ -1284,6 +1353,8 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
         m["label"] = os.path.splitext(f["image"])[0]
         m["brightness"] = f["brightness"]
         m["clipped"] = f["clipped"]
+        m["leak_rows"] = f.get("leak_rows", 0)
+        m["mat_edge_y"] = f.get("mat_y", np.nan) if f.get("mat_y") is not None else np.nan
         m["touches_roi_bottom"] = f["touches_roi_bottom"]
         m["t_s"] = _time_for(f["path"], i, cfg)
         rows.append(m)
@@ -1369,7 +1440,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
                                         resid > max(3 * mad_r, 1.0), False)
     else:
         df["spread_outlier"] = np.zeros(len(df), bool)
-    df["broken"] = (df["tier"] == "REJECT") | df["clipped"].astype(bool).to_numpy()
+    df["broken"] = (df["tier"] == "REJECT").to_numpy()
     df["use"] = ~(df["broken"].to_numpy() | df["spread_outlier"].to_numpy())
 
     if scale:
@@ -1566,9 +1637,14 @@ def warnings_for(df, info):
 
     clipped = df[df["clipped"].astype(bool)]
     if len(clipped):
-        out.append(f"WARNING: {len(clipped)} of {n} silhouette(s) run into the edge of the crop "
-                   f"({', '.join(sorted(set(clipped['clipped'])))}). The crop is cutting the bead "
-                   f"off, so h / a / V describe the CROP, not the bead. Widen --roi and re-run.")
+        out.append(f"WARNING: {len(clipped)} of {n} silhouette(s) still touch the edge of the "
+                   f"crop ({', '.join(sorted(set(clipped['clipped'])))}) after mat strips at the "
+                   f"foot were cut off. They are kept, but if the bead itself reaches the edge "
+                   f"its volume describes the crop -- draw the crop a little wider.")
+    if "leak_rows" in df.columns and (df["leak_rows"] > 0).any():
+        k = int((df["leak_rows"] > 0).sum())
+        out.append(f"{k} frame(s) had a strip of shiny wet mat joined to the bead's foot; it "
+                   f"was cut off at the bead's own width before measuring.")
 
     if info["baseline_source"] == "auto":
         out.append("the mat row was inferred from the silhouettes themselves, so it can only be "

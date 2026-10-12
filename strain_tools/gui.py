@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+# ============================================================================
+#  BEAD SHRINKAGE  |  window
+#
+#  One window over run_local.analyse_set: choose a set, drag the crop on the
+#  first image (the same box is shown on the last one), press Run.  Shows the
+#  three results -- time-lapse strain, mat rise, first + last strain -- and
+#  saves everything beside the images exactly as the command line does.
+#
+#      pythonw gui.py            (or double-click "Bead Shrinkage" on the desktop)
+#
+#  Tk only: nothing to install beyond requirements.txt.  Images are handed to
+#  Tk as PNG bytes encoded by OpenCV, so Pillow is not needed either.
+# ============================================================================
+from __future__ import annotations
+
+import base64
+import os
+import queue
+import sys
+import threading
+import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import cv2                  # noqa: E402
+import bead_pipeline as bp  # noqa: E402
+import run_local as rl      # noqa: E402
+
+VIEW_W = 560            # on-screen width of each image preview
+VIEW_H = 377
+
+
+def _open(path):
+    try:
+        os.startfile(path)                     # Windows
+    except AttributeError:
+        import subprocess
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+
+
+class App:
+    def __init__(self, root):
+        import tkinter as tk
+        from tkinter import ttk
+        self.tk, self.ttk, self.root = tk, ttk, root
+        root.title("Bead Shrinkage")
+        root.minsize(1180, 860)
+        self.saved = rl.load_settings()
+        self.q = queue.Queue()
+        self.busy = False
+        self.paths, self.final = [], None
+        self.full = (0, 0)            # full image size (W, H)
+        self.scale = 1.0              # preview px per image px
+        self.roi = None
+        self.drag0 = None
+        self.res = None
+
+        pad = dict(padx=8, pady=4)
+        # ---- folder
+        top = ttk.Frame(root)
+        top.pack(fill="x", **pad)
+        ttk.Label(top, text="Set folder:").pack(side="left")
+        self.folder = tk.StringVar(value=self.saved.get("last_dir", ""))
+        e = ttk.Entry(top, textvariable=self.folder)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        e.bind("<Return>", lambda _e: self.load_folder())
+        ttk.Button(top, text="Browse...", command=self.browse).pack(side="left")
+        self.info = tk.StringVar(value="Choose a folder of images.")
+        ttk.Label(root, textvariable=self.info, foreground="#444").pack(anchor="w", **pad)
+
+        # ---- the two images
+        pics = ttk.Frame(root)
+        pics.pack(**pad)
+        lf1 = ttk.LabelFrame(pics, text="First image - drag a box round the bead")
+        lf1.grid(row=0, column=0, padx=4)
+        lf2 = ttk.LabelFrame(pics, text="Last image - the same box, check the bead fits")
+        lf2.grid(row=0, column=1, padx=4)
+        self.c1 = tk.Canvas(lf1, width=VIEW_W, height=VIEW_H, bg="#222", highlightthickness=0,
+                            cursor="crosshair")
+        self.c2 = tk.Canvas(lf2, width=VIEW_W, height=VIEW_H, bg="#222", highlightthickness=0)
+        self.c1.pack(padx=4, pady=4)
+        self.c2.pack(padx=4, pady=4)
+        self.c1.bind("<ButtonPress-1>", self.drag_start)
+        self.c1.bind("<B1-Motion>", self.drag_move)
+        self.c1.bind("<ButtonRelease-1>", self.drag_end)
+        self.img1 = self.img2 = None
+
+        # ---- crop + options
+        opt = ttk.Frame(root)
+        opt.pack(fill="x", **pad)
+        ttk.Label(opt, text="Crop  x0,x1,y0,y1:").grid(row=0, column=0, sticky="w")
+        self.roi_txt = tk.StringVar()
+        re_ = ttk.Entry(opt, textvariable=self.roi_txt, width=26)
+        re_.grid(row=0, column=1, sticky="w", padx=6)
+        re_.bind("<Return>", lambda _e: self.typed_roi())
+        re_.bind("<FocusOut>", lambda _e: self.typed_roi())
+        ttk.Button(opt, text="Whole frame", command=lambda: self.set_roi(None)).grid(
+            row=0, column=2, sticky="w")
+
+        ttk.Label(opt, text="Seconds between images:").grid(row=1, column=0, sticky="w")
+        self.interval = tk.StringVar(value=str(self.saved.get("interval") or 60))
+        ttk.Entry(opt, textvariable=self.interval, width=8).grid(row=1, column=1, sticky="w",
+                                                                 padx=6)
+        self.last_final = tk.BooleanVar(value=bool(self.saved.get("last_is_final", True)))
+        ttk.Checkbutton(opt, text="Last image is the final photo (leave it out of the "
+                        "time-lapse)", variable=self.last_final,
+                        command=self.refresh_info).grid(row=2, column=0, columnspan=3,
+                                                        sticky="w")
+        self.first_last = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt, text="Also measure the first + last image only",
+                        variable=self.first_last).grid(row=3, column=0, columnspan=3,
+                                                       sticky="w")
+        ttk.Label(opt, text="Leave out (file names, comma separated):").grid(
+            row=4, column=0, sticky="w")
+        self.skip = tk.StringVar()
+        se = ttk.Entry(opt, textvariable=self.skip, width=40)
+        se.grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
+        se.bind("<FocusOut>", lambda _e: self.load_folder(keep_roi=True))
+        se.bind("<Return>", lambda _e: self.load_folder(keep_roi=True))
+
+        # ---- run
+        run = ttk.Frame(root)
+        run.pack(fill="x", **pad)
+        self.run_btn = ttk.Button(run, text="RUN", command=self.start, width=14)
+        self.run_btn.pack(side="left")
+        self.bar = ttk.Progressbar(run, length=420, mode="determinate")
+        self.bar.pack(side="left", padx=10)
+        self.status = tk.StringVar()
+        ttk.Label(run, textvariable=self.status).pack(side="left")
+
+        # ---- results
+        rf = ttk.LabelFrame(root, text="Results")
+        rf.pack(fill="both", expand=True, **pad)
+        btns = ttk.Frame(rf)
+        btns.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
+        sb = ttk.Scrollbar(rf, orient="vertical")
+        sb.pack(side="right", fill="y", pady=4)
+        self.out = tk.Text(rf, height=14, font=("Consolas", 10), wrap="none",
+                           yscrollcommand=sb.set)
+        self.out.pack(fill="both", expand=True, padx=4, pady=4)
+        sb.config(command=self.out.yview)
+        self.b_sum = ttk.Button(btns, text="Open summary", state="disabled",
+                                command=lambda: _open(os.path.join(self.res["outdir"],
+                                                                   "summary.txt")))
+        self.b_plot = ttk.Button(btns, text="Open strain plot", state="disabled",
+                                 command=lambda: _open(os.path.join(
+                                     self.res["outdir"], "volumetric_strain.png")))
+        self.b_mat = ttk.Button(btns, text="Open mat plot", state="disabled",
+                                command=lambda: _open(os.path.join(self.res["outdir"],
+                                                                   "mat_height.png")))
+        self.b_pair = ttk.Button(btns, text="Open first + last picture", state="disabled",
+                                 command=lambda: _open(os.path.join(self.res["pairdir"],
+                                                                    "pair.png")))
+        self.b_dir = ttk.Button(btns, text="Open results folder", state="disabled",
+                                command=lambda: _open(self.res["outdir"]))
+        for b in (self.b_sum, self.b_plot, self.b_mat, self.b_pair, self.b_dir):
+            b.pack(side="left", padx=3)
+
+        if self.folder.get() and os.path.isdir(self.folder.get()):
+            self.load_folder()
+        root.after(100, self.poll)
+
+    # ------------------------------------------------------------ folder
+    def browse(self):
+        from tkinter import filedialog
+        d = filedialog.askdirectory(title="Choose the folder of bead images",
+                                    initialdir=self.folder.get() or os.path.expanduser("~"),
+                                    mustexist=True, parent=self.root)
+        if d:
+            self.folder.set(d)
+            self.skip.set("")
+            self.load_folder()
+
+    def skips(self):
+        return [s.strip() for s in self.skip.get().split(",") if s.strip()]
+
+    def load_folder(self, keep_roi=False):
+        d = self.folder.get().strip().strip('"')
+        if not os.path.isdir(d):
+            self.info.set(f"Not a folder: {d}")
+            return
+        allp = [p for p in bp.list_frames(d) if os.path.basename(p) not in set(self.skips())]
+        if len(allp) < 2:
+            self.info.set(f"Only {len(allp)} image(s) in this folder - need at least 2.")
+            self.paths = []
+            return
+        self.all_paths = allp
+        first, last = allp[0], allp[-1]
+        b1, b2 = cv2.imread(first), cv2.imread(last)
+        if b1 is None or b2 is None:
+            self.info.set("Could not read the first or last image.")
+            return
+        H, W = b1.shape[:2]
+        self.full = (W, H)
+        self.scale = min(VIEW_W / W, VIEW_H / H)
+        self.img1 = self._photo(b1)
+        self.img2 = self._photo(b2)
+        for c, im in ((self.c1, self.img1), (self.c2, self.img2)):
+            c.delete("all")
+            c.create_image(0, 0, anchor="nw", image=im)
+        self.names = (os.path.basename(first), os.path.basename(last))
+        if not keep_roi:
+            # the crop used last time on THIS folder, if any (the bead is not in
+            # the same place in every set, so another set's crop is not offered)
+            per = self.saved.get("rois", {})
+            self.set_roi(tuple(per[d]) if d in per else None)
+        else:
+            self.set_roi(self.roi)
+        self.refresh_info()
+
+    def refresh_info(self):
+        if not getattr(self, "all_paths", None):
+            return
+        n = len(self.all_paths)
+        series = n - 1 if self.last_final.get() else n
+        fin = (f"   final photo: {self.names[1]}" if self.last_final.get() else "")
+        self.info.set(f"{n} images   first: {self.names[0]}   last: {self.names[1]}   "
+                      f"-> time-lapse uses {series}{fin}")
+
+    def _photo(self, bgr):
+        small = cv2.resize(bgr, None, fx=self.scale, fy=self.scale,
+                           interpolation=cv2.INTER_AREA)
+        ok, png = cv2.imencode(".png", small)
+        return self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
+
+    # -------------------------------------------------------------- crop
+    def set_roi(self, roi):
+        self.roi = tuple(int(v) for v in roi) if roi else None
+        self.roi_txt.set(",".join(str(v) for v in self.roi) if self.roi else "")
+        for c in (self.c1, self.c2):
+            c.delete("box")
+            if self.roi:
+                x0, x1, y0, y1 = (v * self.scale for v in self.roi)
+                c.create_rectangle(x0, y0, x1, y1, outline="#ff3b30", width=2, tags="box")
+
+    def typed_roi(self):
+        t = self.roi_txt.get().strip()
+        if not t:
+            self.set_roi(None)
+            return
+        try:
+            self.set_roi(rl.parse_roi(t))
+        except Exception:
+            self.status.set("Crop must be four numbers: x0,x1,y0,y1")
+
+    def drag_start(self, ev):
+        self.drag0 = (ev.x, ev.y)
+
+    def drag_move(self, ev):
+        if not self.drag0:
+            return
+        self.c1.delete("drag")
+        self.c1.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
+                                 dash=(4, 2), tags="drag")
+
+    def drag_end(self, ev):
+        if not self.drag0 or not self.full[0]:
+            return
+        self.c1.delete("drag")
+        (ax, ay), self.drag0 = self.drag0, None
+        W, H = self.full
+        x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
+        y0, y1 = sorted((ay / self.scale, ev.y / self.scale))
+        x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
+        x1, y1 = min(W, int(round(x1))), min(H, int(round(y1)))
+        if x1 - x0 >= 20 and y1 - y0 >= 20:
+            self.set_roi((x0, x1, y0, y1))
+
+    # --------------------------------------------------------------- run
+    def start(self):
+        if self.busy:
+            return
+        self.typed_roi()
+        d = self.folder.get().strip().strip('"')
+        if not getattr(self, "all_paths", None) or not os.path.isdir(d):
+            self.status.set("Choose a folder first.")
+            return
+        if not self.roi:
+            from tkinter import messagebox
+            if not messagebox.askyesno("No crop", "No box is drawn, so the whole frame will "
+                                       "be measured. Go ahead?", parent=self.root):
+                return
+        try:
+            iv = float(self.interval.get()) if self.interval.get().strip() else None
+        except ValueError:
+            self.status.set("Seconds between images must be a number.")
+            return
+        cfg = dict(SCALE_PX_PER_UM=bp.DEFAULTS["SCALE_PX_PER_UM"], ROI=self.roi,
+                   INVERT=False, MANUAL_THRESH=None, THRESH_OFFSET=0, SEGMENT_METHOD="otsu",
+                   MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"], BASELINE="blue",
+                   BASELINE_TUNE=0.0, MAT_MODE="auto", CLIP_AT_BASELINE=True,
+                   INTERVAL_S=iv, TIME_REGEX=None)
+        rois = dict(self.saved.get("rois", {}))
+        if self.roi:
+            rois[d] = list(self.roi)
+        self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois,
+                          last_is_final=self.last_final.get(),
+                          roi=list(self.roi) if self.roi else None)
+        rl.save_settings(self.saved)
+
+        self.busy = True
+        self.run_btn.state(["disabled"])
+        for b in (self.b_sum, self.b_plot, self.b_mat, self.b_pair, self.b_dir):
+            b.state(["disabled"])
+        self.out.delete("1.0", "end")
+        self.bar["value"] = 0
+        self.status.set("measuring images...")
+        args = (d, cfg, self.skips(), self.last_final.get(), self.first_last.get())
+        threading.Thread(target=self.work, args=args, daemon=True).start()
+
+    def work(self, d, cfg, skip, last_final, first_last):
+        try:
+            res = rl.analyse_set(d, cfg, "analysis", "*", skip, last_final, first_last,
+                                 quiet=True,
+                                 progress=lambda i, n: self.q.put(("prog", i, n)))
+            self.q.put(("done", res))
+        except BaseException as e:
+            self.q.put(("fail", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
+
+    def poll(self):
+        try:
+            while True:
+                msg = self.q.get_nowait()
+                if msg[0] == "prog":
+                    _, i, n = msg
+                    self.bar["maximum"] = n
+                    self.bar["value"] = i
+                    self.status.set(f"measuring images... {i} / {n}"
+                                    if i < n else "working out strains, plots, first + last...")
+                elif msg[0] == "done":
+                    self.finish(msg[1])
+                elif msg[0] == "fail":
+                    self.busy = False
+                    self.run_btn.state(["!disabled"])
+                    self.status.set("FAILED - see below")
+                    self.out.insert("end", msg[1])
+        except queue.Empty:
+            pass
+        self.root.after(100, self.poll)
+
+    def finish(self, res):
+        self.res = res
+        self.busy = False
+        self.run_btn.state(["!disabled"])
+        self.bar["value"] = self.bar["maximum"]
+        self.status.set(f"done - saved in {res['outdir']}")
+        self.out.insert("end", rl.results_text(res))
+        for b in (self.b_sum, self.b_plot, self.b_mat, self.b_dir):
+            b.state(["!disabled"])
+        if res.get("pairdir"):
+            self.b_pair.state(["!disabled"])
+
+
+def main():
+    import tkinter as tk
+    try:
+        from ctypes import windll                       # sharp text on a scaled display
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

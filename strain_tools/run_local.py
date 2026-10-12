@@ -375,6 +375,40 @@ def drying_lines(u, cfg):
     return out + [f"                      {rule}"]
 
 
+def mat_rise(df, scale):
+    """How far the mat's edge rose over the run, from each frame's own read.
+
+    The edge is read off the mat's colour on every frame (mat_edge_y, image
+    rows, so a RISING mat has a falling Y).  Start and end are the median of
+    the first and last five frames that read it, so one bad read cannot set
+    either.  Adds mat_rise_px / mat_rise_um columns; None when nothing read.
+    """
+    if "mat_edge_y" not in df.columns:
+        return None
+    y = df["mat_edge_y"].to_numpy(float)
+    ok = np.isfinite(y)
+    if ok.sum() < 2:
+        return None
+    yo = y[ok]
+    k = min(5, len(yo))
+    y0, y1 = float(np.median(yo[:k])), float(np.median(yo[-k:]))
+    df["mat_rise_px"] = y0 - y
+    if scale:
+        df["mat_rise_um"] = (y0 - y) / scale
+    rise = y0 - y1
+    return dict(y_start=y0, y_end=y1, rise_px=rise,
+                rise_um=rise / scale if scale else np.nan,
+                max_rise_px=float(np.nanmax(y0 - yo)), n_read=int(ok.sum()))
+
+
+def mat_rise_line(mr):
+    if not mr:
+        return "    mat height        not read (no blue mat edge in the crop)"
+    return (f"    mat height        rises {mr['rise_px']:+.0f} px = {mr['rise_um']:+,.0f} um   "
+            f"(edge Y {mr['y_start']:.0f} -> {mr['y_end']:.0f}; highest "
+            f"{mr['max_rise_px']:+.0f} px)")
+
+
 def write_report(df, info, outdir):
     cfg = info["cfg"]
     L = []
@@ -471,6 +505,7 @@ def write_report(df, info, outdir):
             L.append(f"    median spread     none -- only {info['deciders'][0]} votes, so "
                      f"nothing cross-checks it")
         L.extend(drying_lines(u, cfg))
+        L.append(mat_rise_line(info.get("mat_rise")))
         alt = info.get("mat_alt")
         if alt:
             L.append(f"    moving mat        read as: {alt['chosen']}  "
@@ -506,14 +541,31 @@ def write_report(df, info, outdir):
 
 
 # ----------------------------------------------------------------------- run
-def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="analysis"):
-    paths = bp.list_frames(folder, pattern)
+def series_paths(folder, pattern="*", skip=(), last_is_final=False):
+    """(time-lapse images, final photo or None) for one set.
+
+    `skip` names files to leave out.  With `last_is_final` the last file is a
+    separate final photo (for example taken after pressing the mat flat): it
+    is kept out of the time-lapse, where its time would be wrong, and used only
+    for the first + last measurement."""
+    skip = {os.path.basename(x) for x in skip}
+    paths = [p for p in bp.list_frames(folder, pattern) if os.path.basename(p) not in skip]
+    final = paths.pop() if last_is_final and paths else None
+    return paths, final
+
+
+def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="analysis",
+               skip=(), last_is_final=False, progress=None):
+    paths, final = series_paths(folder, pattern, skip, last_is_final)
     if len(paths) < 2:
         raise SystemExit(f"{folder}: found {len(paths)} image(s); need at least 2")
 
     t0 = time.time()
-    df, info = bp.analyse_folder(paths, cfg, workers=workers)
+    df, info = bp.analyse_folder(paths, cfg, workers=workers, progress=progress)
     secs = time.time() - t0
+    info["series"] = paths
+    info["final_photo"] = final
+    info["mat_rise"] = mat_rise(df, cfg.get("SCALE_PX_PER_UM"))
 
     outdir = os.path.join(folder, out_name or "analysis")
     os.makedirs(outdir, exist_ok=True)
@@ -527,7 +579,8 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="an
                "base_lost", "radial_contact_pct", "aspect_h_over_a", "contact_angle_deg",
                "n_rows", "base_taper", "rows_short",
                "fill_px", "edge_holdout_px", "baseline_y", "Y_apex_full",
-               "Y_widest_full", "Y_bottom_full", "clipped", "clipped_at_mat",
+               "Y_widest_full", "Y_bottom_full", "clipped", "clipped_at_mat", "leak_rows",
+               "mat_edge_y", "mat_rise_px", "mat_rise_um",
                "brightness", "V_over_V0", "vol_shrinkage_pct", "vol_strain_pct",
                "linear_strain_pct", "height_strain_pct", "radial_strain_pct"])
     cols = [c for c in cols if c in df.columns]
@@ -560,6 +613,11 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="an
             "base radius (um)" if um else "base radius (px)",
             headline="final  {v:,.0f}", colour=SERIES["V_extrap"], zero_line=False)),
         ("shape_strain.png", lambda o: plot_shape_strain(df, info, o)),
+        ("mat_height.png", lambda o: plot_vs_time(
+            df, info, o, "mat_rise_um" if um else "mat_rise_px",
+            "How far the mat edge has risen", "mat rise (um)" if um else "mat rise (px)",
+            headline="final  {v:+,.0f}", colour=SERIES["V_disk"])
+            if "mat_rise_px" in df.columns else None),
         ("volumes.png", lambda o: plot_volumes(df, info, o)),
         ("agreement.png", lambda o: plot_agreement(df, info, o)),
     ]
@@ -659,7 +717,7 @@ def plot_pair(paths, cfg, df, out):
     plt.close(fig)
 
 
-def run_pair(paths, cfg, outdir, quiet=False):
+def run_pair(paths, cfg, outdir, quiet=False, why=None):
     """Measure two chosen photos on their own and save the result in outdir."""
     cfg2 = dict(cfg, PAIR_MODE=True, INTERVAL_S=None, TIME_REGEX=None)
     df, info = bp.analyse_folder(list(paths), cfg2, workers=2)
@@ -670,8 +728,8 @@ def run_pair(paths, cfg, outdir, quiet=False):
     head = ("  TWO-PHOTO MEASUREMENT\n"
             f"    initial  {paths[0]}\n"
             f"    final    {paths[1]}\n"
-            "  Chosen by hand because the mat moved during the tracked run. Each\n"
-            "  photo is measured to its own mat edge, so nothing here is rebuilt.\n"
+            + (why or "  Chosen by hand because the mat moved during the tracked run.")
+            + "\n  Each photo is measured to its own mat edge, so nothing here is rebuilt.\n"
             "  The tracked run's own results are unchanged, in the folder beside this.\n\n")
     report = write_report(df, info, outdir)
     with open(os.path.join(outdir, "summary.txt"), "w") as f:
@@ -747,6 +805,112 @@ def offer_pair(folder, info, cfg, out_name, pair=None, ask=True, quiet=False):
     except OSError:
         pass
     print(line)
+
+
+# ------------------------------------------------------- one set, all three
+def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
+                last_is_final=False, first_last=True, workers=None, quiet=True,
+                progress=None):
+    """Everything for one set, as the GUI shows it:
+
+      1. the time-lapse, every image but the final photo (if there is one)
+      2. how far the mat edge rose over the time-lapse
+      3. the first image against the last image of the folder on their own,
+         with the same crop, each measured to its own mat edge
+
+    Writes <out>/ and <out>_pair/ as before, plus <out>/results.txt with the
+    three side by side.  Returns a dict of the headline numbers.
+    """
+    df, info = run_folder(folder, cfg, pattern, workers, quiet, out_name,
+                          skip=skip, last_is_final=last_is_final, progress=progress)
+    outdir = os.path.join(folder, out_name or "analysis")
+    res = dict(folder=folder, outdir=outdir, pairdir=None)
+    u = df[df["use"]] if df["use"].any() else df
+    res["series_strain"] = float(u["vol_strain_pct"].iloc[-1])
+    res["series_span"] = (u["image"].iloc[0], u["image"].iloc[-1], len(u), len(df))
+    to_mm3 = 1.0 / cfg["SCALE_PX_PER_UM"] ** 3 / 1e9
+    res["series_v0_mm3"] = float(u["V_consensus"].iloc[0]) * to_mm3
+    res["series_v1_mm3"] = float(u["V_consensus"].iloc[-1]) * to_mm3
+    try:
+        v = 100.0 * u["V_consensus"].to_numpy(float) / float(u["V_consensus"].iloc[0])
+        res["drying"] = bp.drying_status(u["t_s"].to_numpy(float) / 60.0, v)["state"]
+    except Exception:
+        res["drying"] = "not judged"
+    res["mat_rise"] = info.get("mat_rise")
+
+    pair = None
+    if first_last:
+        first = info["series"][0]
+        last = info["final_photo"] or info["series"][-1]
+        pdir = outdir + "_pair"
+        why = ("  The first and the last image of the folder, measured on their own with the\n"
+               "  same crop as the time-lapse.")
+        try:
+            dfp, _ = run_pair((first, last), cfg, pdir, quiet=True, why=why)
+            pair = dict(first=os.path.basename(first), last=os.path.basename(last),
+                        strain=float(dfp["vol_strain_pct"].iloc[-1]),
+                        v0_mm3=float(dfp["V_consensus_mm3"].iloc[0]),
+                        v1_mm3=float(dfp["V_consensus_mm3"].iloc[-1]),
+                        ok=bool(dfp["use"].all()))
+            # Without a separate final photo the "last" image is the last
+            # time-lapse frame, and if the mat edge has risen by then it hides
+            # the bead's bottom: measured to that edge the final volume is too
+            # small and the strain too large (88%_8hr_7: -42 % against -31 %).
+            mr = res["mat_rise"]
+            if info["final_photo"] is None and mr and mr["rise_px"] >= MAT_PAIR_PX:
+                pair["hidden_px"] = mr["rise_px"]
+            res["pairdir"] = pdir
+        except Exception as e:
+            pair = dict(first=os.path.basename(first), last=os.path.basename(last),
+                        error=f"{type(e).__name__}: {e}")
+    res["pair"] = pair
+
+    with open(os.path.join(outdir, "results.txt"), "w") as f:
+        f.write(results_text(res))
+    return res
+
+
+def results_text(res):
+    a, b, n_used, n = res["series_span"]
+    L = ["=" * 72, f" RESULTS  {os.path.basename(res['folder'])}", "=" * 72,
+         "",
+         f"  1. TIME-LAPSE   {a} -> {b}   ({n_used} of {n} frames used)",
+         f"     volumetric strain   {res['series_strain']:+.2f} %",
+         f"     volume              {res['series_v0_mm3']:.3f} -> {res['series_v1_mm3']:.3f} mm^3",
+         f"     drying              {res['drying']}",
+         "     (full detail: summary.txt and the plots in this folder)",
+         "",
+         "  2. MAT HEIGHT"]
+    mr = res["mat_rise"]
+    if mr:
+        L += [f"     rise                {mr['rise_px']:+.0f} px = {mr['rise_um']:+,.0f} um",
+              f"     mat edge            Y {mr['y_start']:.0f} -> {mr['y_end']:.0f}"
+              f"   (highest {mr['max_rise_px']:+.0f} px)",
+              "     (image rows count downwards, so a rising mat has a falling Y;",
+              "      per frame: mat_rise_um in per_image.csv, and mat_height.png)"]
+    else:
+        L += ["     not read - no blue mat edge in the crop"]
+    L += ["", "  3. FIRST + LAST IMAGE ONLY"]
+    p = res["pair"]
+    if not p:
+        L += ["     not run"]
+    elif "error" in p:
+        L += [f"     {p['first']} -> {p['last']}: FAILED  {p['error']}"]
+    else:
+        L += [f"     {p['first']} -> {p['last']}",
+              f"     volumetric strain   {p['strain']:+.2f} %",
+              f"     volume              {p['v0_mm3']:.3f} -> {p['v1_mm3']:.3f} mm^3",
+              f"     (full detail: {os.path.basename(res['pairdir'] or '')}/summary.txt, pair.png)"]
+        if not p["ok"]:
+            L += ["     WARNING: one of the two photos was marked broken - look at pair.png"]
+        if p.get("hidden_px"):
+            L += [f"     WARNING: the last image is the last time-lapse frame, and by then the",
+                  f"     mat edge had risen {p['hidden_px']:.0f} px and hides the bottom of the "
+                  f"bead. The final",
+                  "     volume is measured only above that edge, so this strain is TOO LARGE.",
+                  "     For a true first + last value, end the run with a photo taken after",
+                  "     pressing the mat flat, and tick 'last image is the final photo'."]
+    return "\n".join(L) + "\n"
 
 
 # ------------------------------------------------------------- interactive
@@ -915,6 +1079,14 @@ def main(argv=None):
                     help="also measure these two photos on their own (e.g. the first "
                          "image and one taken after pressing the mat flat); saved in "
                          "<out>_pair beside the tracked results")
+    ap.add_argument("--skip", action="append", default=[], metavar="FILE",
+                    help="leave this image out (repeat for more)")
+    ap.add_argument("--last-is-final", action="store_true",
+                    help="the last file is a separate final photo: keep it out of the "
+                         "time-lapse and use it only for the first + last measurement")
+    ap.add_argument("--first-last", action="store_true",
+                    help="also measure the first and last image on their own (saved in "
+                         "<out>_pair) and write <out>/results.txt with all three results")
     ap.add_argument("--no-pair", action="store_true",
                     help="do not offer the two-photo measurement when the mat moves")
     a = ap.parse_args(argv)
@@ -998,7 +1170,12 @@ def main(argv=None):
             elif shared is not None:
                 cfg_sub["ROI"] = shared
             try:
-                _, info_sub = run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet, a.out)
+                if a.first_last:
+                    print(results_text(analyse_set(sub, cfg_sub, a.out, a.pattern, a.skip,
+                                                   a.last_is_final, True, a.workers, a.quiet)))
+                    continue
+                _, info_sub = run_folder(sub, cfg_sub, a.pattern, a.workers, a.quiet, a.out,
+                                         skip=a.skip, last_is_final=a.last_is_final)
                 if not a.no_pair:
                     offer_pair(sub, info_sub, cfg_sub, a.out, ask=True, quiet=a.quiet)
             except SystemExit as e:
@@ -1011,7 +1188,13 @@ def main(argv=None):
             cfg["ROI"] = ask_roi(a.folder, seed)
         save_settings(dict(cfgsave, last_dir=a.folder, interval=a.interval,
                            roi=list(cfg["ROI"]) if cfg["ROI"] else None))
-        _, info = run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out)
+        if a.first_last:
+            res = analyse_set(a.folder, cfg, a.out, a.pattern, a.skip, a.last_is_final,
+                              True, a.workers, a.quiet)
+            print(results_text(res))
+            return
+        _, info = run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out,
+                             skip=a.skip, last_is_final=a.last_is_final)
         if a.pair or not a.no_pair:
             offer_pair(a.folder, info, cfg, a.out, pair=a.pair, quiet=a.quiet)
 

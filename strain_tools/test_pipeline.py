@@ -182,6 +182,25 @@ check("the auto-baseline cap is clear of the decision gate",
 check("a frame is judged broken relative to its run, not a constant",
       0 < bp.FRAME_REJECT_FRAC < 1 and bp.FRAME_REJECT_ABS < bp.MIN_CONF)
 
+print("\nwet mat joined to the bead's foot (88%_8hr_7 Image_015, 88%_8hr_8 Image_136)")
+yy, xx = np.mgrid[0:400, 0:900]
+dome = (((xx - 450) / 300.0) ** 2 + ((yy - 330) / 260.0) ** 2 <= 1) & (yy <= 330)
+strip = (yy >= 322) & (yy <= 345) & ((xx < 330) | (xx > 560))   # climbs along the mat
+leaky = np.uint8(dome | strip) * 255
+cut, n_cut = bp.trim_foot_leak(leaky)
+pr = bp.profile_from_mask(cut)
+check("a strip running to both crop edges is cut off at the bead",
+      n_cut > 0 and pr[2].min() >= 150 - 30 and pr[3].max() <= 750 + 30,
+      f"bead 150..750, kept {pr[2].min()}..{pr[3].max()} (a straight continuation of a "
+      f"near-vertical side may overshoot by a few % of the width)")
+check("the bead above the strip is untouched",
+      np.array_equal(cut[:300] > 0, dome[:300]))
+check("a clean bead is left alone", bp.trim_foot_leak(np.uint8(dome) * 255)[1] == 0)
+wide = np.uint8((((xx - 450) / 520.0) ** 2 + ((yy - 330) / 260.0) ** 2 <= 1)
+                & (yy <= 330)) * 255
+check("a bead that itself fills the crop is not cut (the crop is the user's)",
+      bp.trim_foot_leak(wide)[1] == 0)
+
 print("\nend-to-end against images whose true volume is known")
 here = os.path.dirname(os.path.abspath(__file__))
 gt = os.environ.get("BEAD_GT_DIR", os.path.join(here, "..", "testdata", "gt40"))

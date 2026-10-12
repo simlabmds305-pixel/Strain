@@ -15,6 +15,54 @@ python run_local.py /path/to/set --roi 1050,1950,1350,1720 --interval 30
 python run_local.py /path/to/parent --each          # every subfolder, in one go
 ```
 
+## The window (no typing)
+
+Double-click **Bead Shrinkage** on the desktop, or `Bead Shrinkage.bat` in the
+repo root (it uses Anaconda's `pythonw`). Or run `pythonw gui.py`.
+
+![the window](docs/gui.png)
+
+1. **Browse...** to a set folder. The first and last image appear.
+2. **Drag a box round the bead on the first image.** The same box is drawn on
+   the last image so you can see the bead fits there too, and that one crop is
+   used for every image. You can also type the four numbers. The box is
+   remembered per folder.
+3. Check the seconds between images and the two ticks:
+   - *Last image is the final photo*: the last file is a separate photo (taken
+     after pressing the mat flat), so it is kept out of the time-lapse.
+   - *Also measure the first + last image only*.
+4. **RUN**. The progress bar counts the images, and the three results appear:
+
+   1. **time-lapse**: volumetric strain over every image but the final photo;
+   2. **mat height**: how far the mat's edge rose, in px and µm;
+   3. **first + last**: the first and last image of the folder measured on
+      their own, each to its own mat edge (saved in `analysis_pair/`).
+
+   They are also written to `analysis/results.txt`; the buttons open the
+   summary, the plots and the folder.
+
+The same thing on the command line:
+
+```
+python run_local.py "F:/Volumetric strain/88%_8hr_8 (20261008)" --roi 1000,3000,1050,2076 \
+    --interval 60 --last-is-final --first-last
+```
+
+(`--skip FILE` leaves an image out.)
+
+**No frame is thrown out for touching the crop edge.** The crop is drawn by
+hand round the bead. While the mat is still wet its surface can be as bright
+as the bead, and the outline then runs from the bead's foot sideways along the
+mat to the crop edge. That strip is cut off at the bead's own sides
+(`trim_foot_leak`) and the frame is measured as usual. The summary still warns
+if an outline touches the crop edge after that.
+
+**Read the first + last result with the mat in mind.** If there is no separate
+final photo, the "last" image is the last time-lapse frame. If the mat edge has
+risen by then, it hides the bottom of the bead, the final volume is measured
+only above it, and that strain is too large. `results.txt` warns when this
+happens.
+
 ## Running it on your own machine
 
 ```bash
