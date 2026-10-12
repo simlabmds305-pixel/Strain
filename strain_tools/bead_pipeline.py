@@ -1374,18 +1374,20 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     front = "edge in front" in src
     trust = tuple(k for k in TRUST_METHODS if not (front and k == "V_disk"))
     deciders, med_conf = choose_deciders(conf_table, trust)
+    weights = med_conf
     if cfg.get("FORCE_DECIDERS"):
         # first + last after a time-lapse: vote with the same estimators and
-        # weights as the time-lapse did, so both ends use the same method
+        # weights as the time-lapse did, so both ends use the same method.
+        # med_conf stays these photos' own, so the report shows their scores.
         deciders = [k for k in cfg["FORCE_DECIDERS"] if k in METHODS] or deciders
         if cfg.get("FORCE_WEIGHTS"):
-            med_conf = dict(med_conf, **{k: float(v) for k, v in cfg["FORCE_WEIGHTS"].items()
-                                         if k in METHODS})
+            weights = dict(med_conf, **{k: float(v) for k, v in cfg["FORCE_WEIGHTS"].items()
+                                        if k in METHODS})
     best = np.array([max((r.get(f"conf_{k}", 0.0) for k in deciders), default=0.0)
                      for r in rows], float)
     reject_below = max(FRAME_REJECT_ABS, FRAME_REJECT_FRAC * float(np.nanmedian(best)))
     for m in rows:
-        m.update(verdict_for(m, deciders, med_conf, reject_below))
+        m.update(verdict_for(m, deciders, weights, reject_below))
 
     df = pd.DataFrame(rows)
 

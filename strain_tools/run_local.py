@@ -268,7 +268,7 @@ def method_strains(df):
 BOTH = ("V_disk", "V_extrap")
 
 
-def method_table(df, info, scale):
+def method_table(df, info, scale, forced=False):
     """V_disk and V_extrap side by side, whichever of them decided: start and
     end volume (mm^3), strain, median confidence, and whether it voted.  Both
     are shown because a method can lose its vote on a technicality -- a bead
@@ -285,7 +285,7 @@ def method_table(df, info, scale):
                       strain=100.0 * (v1 / v0 - 1.0) if v0 > 0 else np.nan,
                       conf=float(info["med_conf"].get(k, np.nan)),
                       votes=k in info["deciders"],
-                      trusted=k in info.get("trust", BOTH))
+                      trusted=k in info.get("trust", BOTH), forced=forced)
     return out
 
 
@@ -294,12 +294,14 @@ def method_lines(tab, indent="     "):
     for k, r in tab.items():
         if r["votes"]:
             why = "<- used"
+        elif r.get("forced"):
+            why = "not voting (step 3 uses the time-lapse's method at both ends)"
         elif r["conf"] < bp.MIN_CONF:
             why = f"not voting (confidence {r['conf']:.2f} < {bp.MIN_CONF})"
         elif not r["trusted"]:
             why = "not voting (mat edge in front of the bead: counts only what shows above it)"
         else:
-            why = "not voting (same method as the time-lapse)"
+            why = "not voting"
         L.append(f"{indent}{k:<9s} {r['v0']:8.3f} -> {r['v1']:8.3f} mm^3   "
                  f"{r['strain']:+7.2f} %   conf {r['conf']:.2f}  {why}")
     return L
@@ -903,7 +905,7 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
                         v0_mm3=float(dfp["V_consensus_mm3"].iloc[0]),
                         v1_mm3=float(dfp["V_consensus_mm3"].iloc[-1]),
                         ok=bool(dfp["use"].all()),
-                        methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"]))
+                        methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"], forced=True))
             # Without a separate final photo both ends are time-lapse frames,
             # measured exactly as in step 1, so step 3 can only repeat it.
             pair["same_as_series"] = info["final_photo"] is None
