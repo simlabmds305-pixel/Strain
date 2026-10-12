@@ -265,6 +265,39 @@ def method_strains(df):
     return out
 
 
+BOTH = ("V_disk", "V_extrap")
+
+
+def method_table(df, info, scale):
+    """V_disk and V_extrap side by side, whichever of them decided: start and
+    end volume (mm^3), strain, median confidence, and whether it voted.  Both
+    are shown because a method can lose its vote on a technicality -- a bead
+    whose bottom edge is tilted against the mat row reads as a narrowing base
+    and costs V_disk its vote though its volume is sound."""
+    u = df[df["use"]] if "use" in df.columns and df["use"].any() else df
+    to_mm3 = 1.0 / scale ** 3 / 1e9 if scale else 1.0
+    out = {}
+    for k in BOTH:
+        if k not in u.columns or len(u) < 2:
+            continue
+        v0, v1 = float(u[k].iloc[0]), float(u[k].iloc[-1])
+        out[k] = dict(v0=v0 * to_mm3, v1=v1 * to_mm3,
+                      strain=100.0 * (v1 / v0 - 1.0) if v0 > 0 else np.nan,
+                      conf=float(info["med_conf"].get(k, np.nan)),
+                      votes=k in info["deciders"])
+    return out
+
+
+def method_lines(tab, indent="     "):
+    L = []
+    for k, r in tab.items():
+        why = ("<- used" if r["votes"] else
+               f"not voting (confidence {r['conf']:.2f} < {bp.MIN_CONF})")
+        L.append(f"{indent}{k:<9s} {r['v0']:8.3f} -> {r['v1']:8.3f} mm^3   "
+                 f"{r['strain']:+7.2f} %   conf {r['conf']:.2f}  {why}")
+    return L
+
+
 def plot_volumes(df, info, out):
     """The four estimators over the run, each labelled with its own final
     volumetric strain, and the reported (voting) result named in the title."""
@@ -465,6 +498,7 @@ def write_report(df, info, outdir):
             L.append("      by method       " + "   ".join(
                 f"{k} {v:+.2f}%" + ("*" if k in info["deciders"] else "")
                 for k, v in ms.items()) + "   (* votes)")
+        L.extend(method_lines(method_table(df, info, scale), indent="        "))
         L.append(f"    linear strain     {u['linear_strain_pct'].iloc[-1]:+.2f} %"
                  f"   (cube root of the volume ratio)")
         if {"height_strain_pct", "radial_strain_pct"} <= set(u.columns):
@@ -837,6 +871,7 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
     except Exception:
         res["drying"] = "not judged"
     res["mat_rise"] = info.get("mat_rise")
+    res["series_methods"] = method_table(df, info, cfg["SCALE_PX_PER_UM"])
 
     pair = None
     if first_last:
@@ -846,12 +881,13 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
         why = ("  The first and the last image of the folder, measured on their own with the\n"
                "  same crop as the time-lapse.")
         try:
-            dfp, _ = run_pair((first, last), cfg, pdir, quiet=True, why=why)
+            dfp, infop = run_pair((first, last), cfg, pdir, quiet=True, why=why)
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
                         strain=float(dfp["vol_strain_pct"].iloc[-1]),
                         v0_mm3=float(dfp["V_consensus_mm3"].iloc[0]),
                         v1_mm3=float(dfp["V_consensus_mm3"].iloc[-1]),
-                        ok=bool(dfp["use"].all()))
+                        ok=bool(dfp["use"].all()),
+                        methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"]))
             # Without a separate final photo the "last" image is the last
             # time-lapse frame, and if the mat edge has risen by then it hides
             # the bead's bottom: measured to that edge the final volume is too
@@ -878,6 +914,8 @@ def results_text(res):
          f"     volumetric strain   {res['series_strain']:+.2f} %",
          f"     volume              {res['series_v0_mm3']:.3f} -> {res['series_v1_mm3']:.3f} mm^3",
          f"     drying              {res['drying']}",
+         "     by method:",
+         *method_lines(res.get("series_methods", {}), "       "),
          "     (full detail: summary.txt and the plots in this folder)",
          "",
          "  2. MAT HEIGHT"]
@@ -900,6 +938,8 @@ def results_text(res):
         L += [f"     {p['first']} -> {p['last']}",
               f"     volumetric strain   {p['strain']:+.2f} %",
               f"     volume              {p['v0_mm3']:.3f} -> {p['v1_mm3']:.3f} mm^3",
+              "     by method:",
+              *method_lines(p.get("methods", {}), "       "),
               f"     (full detail: {os.path.basename(res['pairdir'] or '')}/summary.txt, pair.png)"]
         if not p["ok"]:
             L += ["     WARNING: one of the two photos was marked broken - look at pair.png"]
