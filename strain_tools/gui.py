@@ -54,6 +54,7 @@ class App:
         self.scale = 1.0              # preview px per image px
         self.roi = None
         self.drag0 = None
+        self.roi2 = None              # step 3's own crop for the last image
         self.res = None
 
         pad = dict(padx=8, pady=4)
@@ -74,16 +75,17 @@ class App:
         pics.pack(**pad)
         lf1 = ttk.LabelFrame(pics, text="First image - drag a box round the bead")
         lf1.grid(row=0, column=0, padx=4)
-        lf2 = ttk.LabelFrame(pics, text="Last image - the same box, check the bead fits")
+        self.lf2 = lf2 = ttk.LabelFrame(pics, text=self.LF2_SAME)
         lf2.grid(row=0, column=1, padx=4)
         self.c1 = tk.Canvas(lf1, width=VIEW_W, height=VIEW_H, bg="#222", highlightthickness=0,
                             cursor="crosshair")
         self.c2 = tk.Canvas(lf2, width=VIEW_W, height=VIEW_H, bg="#222", highlightthickness=0)
         self.c1.pack(padx=4, pady=4)
         self.c2.pack(padx=4, pady=4)
-        self.c1.bind("<ButtonPress-1>", self.drag_start)
-        self.c1.bind("<B1-Motion>", self.drag_move)
-        self.c1.bind("<ButtonRelease-1>", self.drag_end)
+        for c, which in ((self.c1, 1), (self.c2, 2)):
+            c.bind("<ButtonPress-1>", lambda ev, w=which: self.drag_start(ev, w))
+            c.bind("<B1-Motion>", lambda ev, w=which: self.drag_move(ev, w))
+            c.bind("<ButtonRelease-1>", lambda ev, w=which: self.drag_end(ev, w))
         self.img1 = self.img2 = None
 
         # ---- crop + options
@@ -111,6 +113,18 @@ class App:
         ttk.Checkbutton(opt, text="Also measure the first + last image only",
                         variable=self.first_last).grid(row=3, column=0, columnspan=3,
                                                        sticky="w")
+        self.own_crop = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt, text="Own crop for the last image in first + last (drag it on "
+                        "the last image - for a final photo taken after the stage moved)",
+                        variable=self.own_crop, command=self.toggle_own_crop).grid(
+            row=3, column=3, columnspan=3, sticky="w", padx=(20, 0))
+        ttk.Label(opt, text="Last-image crop:").grid(row=4, column=3, sticky="e",
+                                                     padx=(20, 0))
+        self.roi2_txt = tk.StringVar()
+        r2 = ttk.Entry(opt, textvariable=self.roi2_txt, width=26)
+        r2.grid(row=4, column=4, sticky="w", padx=6)
+        r2.bind("<Return>", lambda _e: self.typed_roi2())
+        r2.bind("<FocusOut>", lambda _e: self.typed_roi2())
         ttk.Label(opt, text="Leave out (file names, comma separated):").grid(
             row=4, column=0, sticky="w")
         self.skip = tk.StringVar()
@@ -204,9 +218,13 @@ class App:
             # the crop used last time on THIS folder, if any (the bead is not in
             # the same place in every set, so another set's crop is not offered)
             per = self.saved.get("rois", {})
+            per2 = self.saved.get("rois_last", {})
+            self.roi2 = tuple(per2[d]) if d in per2 else None
+            self.own_crop.set(self.roi2 is not None)
             self.set_roi(tuple(per[d]) if d in per else None)
         else:
             self.set_roi(self.roi)
+        self.toggle_own_crop()
         self.refresh_info()
 
     def refresh_info(self):
@@ -225,14 +243,47 @@ class App:
         return self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
 
     # -------------------------------------------------------------- crop
+    LF2_SAME = "Last image - the same box, check the bead fits"
+    LF2_OWN = "Last image - drag its OWN box (used only in first + last)"
+
+    def _box(self, c, roi, colour):
+        c.delete("box")
+        if roi:
+            x0, x1, y0, y1 = (v * self.scale for v in roi)
+            c.create_rectangle(x0, y0, x1, y1, outline=colour, width=2, tags="box")
+
     def set_roi(self, roi):
         self.roi = tuple(int(v) for v in roi) if roi else None
         self.roi_txt.set(",".join(str(v) for v in self.roi) if self.roi else "")
-        for c in (self.c1, self.c2):
-            c.delete("box")
-            if self.roi:
-                x0, x1, y0, y1 = (v * self.scale for v in self.roi)
-                c.create_rectangle(x0, y0, x1, y1, outline="#ff3b30", width=2, tags="box")
+        self._box(self.c1, self.roi, "#ff3b30")
+        self.redraw_last()
+
+    def set_roi2(self, roi):
+        self.roi2 = tuple(int(v) for v in roi) if roi else None
+        self.redraw_last()
+
+    def redraw_last(self):
+        own = self.own_crop.get()
+        r = (self.roi2 or self.roi) if own else self.roi
+        self._box(self.c2, r, "#34c759" if own and self.roi2 else "#ff3b30")
+        self.roi2_txt.set(",".join(str(v) for v in self.roi2) if own and self.roi2 else "")
+        self.c2.config(cursor="crosshair" if own else "")
+
+    def toggle_own_crop(self):
+        own = self.own_crop.get()
+        self.lf2.config(text=self.LF2_OWN if own else self.LF2_SAME)
+        if own and not self.roi2 and self.roi:
+            self.roi2 = self.roi             # start from the time-lapse's box
+        self.redraw_last()
+
+    def typed_roi2(self):
+        t = self.roi2_txt.get().strip()
+        if not self.own_crop.get():
+            return
+        try:
+            self.set_roi2(rl.parse_roi(t) if t else None)
+        except Exception:
+            self.status.set("Last-image crop must be four numbers: x0,x1,y0,y1")
 
     def typed_roi(self):
         t = self.roi_txt.get().strip()
@@ -244,20 +295,24 @@ class App:
         except Exception:
             self.status.set("Crop must be four numbers: x0,x1,y0,y1")
 
-    def drag_start(self, ev):
-        self.drag0 = (ev.x, ev.y)
+    def _drag_ok(self, which):
+        return which == 1 or self.own_crop.get()
 
-    def drag_move(self, ev):
+    def drag_start(self, ev, which=1):
+        self.drag0 = (ev.x, ev.y) if self._drag_ok(which) else None
+
+    def drag_move(self, ev, which=1):
         if not self.drag0:
             return
-        self.c1.delete("drag")
-        self.c1.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
-                                 dash=(4, 2), tags="drag")
+        c = self.c1 if which == 1 else self.c2
+        c.delete("drag")
+        c.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
+                           dash=(4, 2), tags="drag")
 
-    def drag_end(self, ev):
+    def drag_end(self, ev, which=1):
         if not self.drag0 or not self.full[0]:
             return
-        self.c1.delete("drag")
+        (self.c1 if which == 1 else self.c2).delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
         x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
@@ -265,13 +320,14 @@ class App:
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
         x1, y1 = min(W, int(round(x1))), min(H, int(round(y1)))
         if x1 - x0 >= 20 and y1 - y0 >= 20:
-            self.set_roi((x0, x1, y0, y1))
+            (self.set_roi if which == 1 else self.set_roi2)((x0, x1, y0, y1))
 
     # --------------------------------------------------------------- run
     def start(self):
         if self.busy:
             return
         self.typed_roi()
+        self.typed_roi2()
         d = self.folder.get().strip().strip('"')
         if not getattr(self, "all_paths", None) or not os.path.isdir(d):
             self.status.set("Choose a folder first.")
@@ -294,7 +350,13 @@ class App:
         rois = dict(self.saved.get("rois", {}))
         if self.roi:
             rois[d] = list(self.roi)
-        self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois,
+        pair_roi = self.roi2 if self.own_crop.get() and self.roi2 else None
+        rois_last = dict(self.saved.get("rois_last", {}))
+        if pair_roi:
+            rois_last[d] = list(pair_roi)
+        else:
+            rois_last.pop(d, None)
+        self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois, rois_last=rois_last,
                           last_is_final=self.last_final.get(),
                           roi=list(self.roi) if self.roi else None)
         rl.save_settings(self.saved)
@@ -306,13 +368,13 @@ class App:
         self.out.delete("1.0", "end")
         self.bar["value"] = 0
         self.status.set("measuring images...")
-        args = (d, cfg, self.skips(), self.last_final.get(), self.first_last.get())
+        args = (d, cfg, self.skips(), self.last_final.get(), self.first_last.get(), pair_roi)
         threading.Thread(target=self.work, args=args, daemon=True).start()
 
-    def work(self, d, cfg, skip, last_final, first_last):
+    def work(self, d, cfg, skip, last_final, first_last, pair_roi=None):
         try:
             res = rl.analyse_set(d, cfg, "analysis", "*", skip, last_final, first_last,
-                                 quiet=True,
+                                 quiet=True, pair_roi=pair_roi,
                                  progress=lambda i, n: self.q.put(("prog", i, n)))
             self.q.put(("done", res))
         except BaseException as e:

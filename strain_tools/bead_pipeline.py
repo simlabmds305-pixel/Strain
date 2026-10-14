@@ -422,7 +422,9 @@ def _measure_one(path, cfg, want_mask=False):
         raise FileNotFoundError(f"could not read image: {path}")
     H, W = bgr.shape[:2]
 
-    roi = cfg.get("ROI")
+    # a photo can carry its own crop (first + last: the final photo is often
+    # taken after the stage was moved, so the bead is somewhere else in it)
+    roi = (cfg.get("ROI_PER_IMAGE") or {}).get(os.path.basename(path)) or cfg.get("ROI")
     x0, x1, y0, y1 = roi if roi else (0, W, 0, H)
     x0, x1 = max(0, int(x0)), min(W, int(x1))
     y0, y1 = max(0, int(y0)), min(H, int(y1))

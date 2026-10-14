@@ -50,6 +50,13 @@ python run_local.py "F:/Volumetric strain/88%_8hr_8 (20261008)" --roi 1000,3000,
 
 (`--skip FILE` leaves an image out.)
 
+**A separate crop for the last image (first + last only).** A final photo is
+often taken after the stage was moved, so the bead sits somewhere else in it.
+Tick *Own crop for the last image* and drag a box on the last image (it turns
+green); the first image keeps the time-lapse crop, so it stays the same
+measurement as step 1's first frame. Remembered per folder. Command line:
+`--pair-roi x0,x1,y0,y1`.
+
 **No frame is thrown out for touching the crop edge.** The crop is drawn by
 hand round the bead. While the mat is still wet its surface can be as bright
 as the bead, and the outline then runs from the bead's foot sideways along the

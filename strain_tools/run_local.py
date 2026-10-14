@@ -853,7 +853,7 @@ def offer_pair(folder, info, cfg, out_name, pair=None, ask=True, quiet=False):
 # ------------------------------------------------------- one set, all three
 def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
                 last_is_final=False, first_last=True, workers=None, quiet=True,
-                progress=None):
+                progress=None, pair_roi=None):
     """Everything for one set, as the GUI shows it:
 
       1. the time-lapse, every image but the final photo (if there is one)
@@ -898,6 +898,10 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
                                         else floor.get(os.path.basename(last))],
                         FORCE_DECIDERS=list(info["deciders"]),
                         FORCE_WEIGHTS=dict(info["med_conf"]))
+        if pair_roi:
+            # the last photo gets its own crop; the first keeps the time-lapse's,
+            # so it is still the same measurement as step 1's first frame
+            cfg_pair["ROI_PER_IMAGE"] = {os.path.basename(last): tuple(pair_roi)}
         try:
             dfp, infop = run_pair((first, last), cfg_pair, pdir, quiet=True, why=why)
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
@@ -905,7 +909,9 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
                         v0_mm3=float(dfp["V_consensus_mm3"].iloc[0]),
                         v1_mm3=float(dfp["V_consensus_mm3"].iloc[-1]),
                         ok=bool(dfp["use"].all()),
-                        methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"], forced=True))
+                        methods=method_table(dfp, infop, cfg["SCALE_PX_PER_UM"], forced=True),
+                        crop_first=cfg.get("ROI"), crop_last=tuple(pair_roi) if pair_roi
+                        else cfg.get("ROI"))
             # Without a separate final photo both ends are time-lapse frames,
             # measured exactly as in step 1, so step 3 can only repeat it.
             pair["same_as_series"] = info["final_photo"] is None
@@ -918,6 +924,10 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
     with open(os.path.join(outdir, "results.txt"), "w") as f:
         f.write(results_text(res))
     return res
+
+
+def _crop_txt(roi):
+    return ",".join(str(int(v)) for v in roi) if roi else "whole frame"
 
 
 def results_text(res):
@@ -950,6 +960,9 @@ def results_text(res):
         L += [f"     {p['first']} -> {p['last']}: FAILED  {p['error']}"]
     else:
         L += [f"     {p['first']} -> {p['last']}",
+              f"     crop                first {_crop_txt(p.get('crop_first'))}, "
+              f"last {_crop_txt(p.get('crop_last'))}"
+              + ("  (own crop)" if p.get("crop_last") != p.get("crop_first") else ""),
               f"     volumetric strain   {p['strain']:+.2f} %",
               f"     volume              {p['v0_mm3']:.3f} -> {p['v1_mm3']:.3f} mm^3",
               "     by method:",
@@ -1139,6 +1152,10 @@ def main(argv=None):
     ap.add_argument("--first-last", action="store_true",
                     help="also measure the first and last image on their own (saved in "
                          "<out>_pair) and write <out>/results.txt with all three results")
+    ap.add_argument("--pair-roi", type=parse_roi, default=None, metavar="x0,x1,y0,y1",
+                    help="with --first-last: a separate crop for the LAST image (e.g. a "
+                         "final photo taken after the stage moved); the first image keeps "
+                         "--roi")
     ap.add_argument("--no-pair", action="store_true",
                     help="do not offer the two-photo measurement when the mat moves")
     a = ap.parse_args(argv)
@@ -1242,7 +1259,7 @@ def main(argv=None):
                            roi=list(cfg["ROI"]) if cfg["ROI"] else None))
         if a.first_last:
             res = analyse_set(a.folder, cfg, a.out, a.pattern, a.skip, a.last_is_final,
-                              True, a.workers, a.quiet)
+                              True, a.workers, a.quiet, pair_roi=a.pair_roi)
             print(results_text(res))
             return
         _, info = run_folder(a.folder, cfg, a.pattern, a.workers, a.quiet, a.out,
