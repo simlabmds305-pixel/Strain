@@ -103,6 +103,10 @@ LIKELY_TOL = 0.05    # within 5%                     -> LIKELY
 # 0.95), which is shadow erosion arriving.  Raise it and you lose frames;
 # lower it and the contact radius starts measuring the shadow's edge.
 BASE_TAPER_MIN = 0.98
+# The base is read over a band this deep above the bottom of the silhouette,
+# so a tilted or wavy bottom edge still shows both of the bead's corners.
+BASE_BAND_FRAC = 0.03    # of the bead's height
+BASE_BAND_MIN_PX = 5.0
 GAP_FULL = 0.15      # mask ending this far from the mat scores V_disk zero
 TAPER_FULL = 0.25    # base narrowed to (1 - this) of the widest row scores zero
 TRUNC_FULL = 0.03    # V_trunc discarding this share of the volume scores it zero
@@ -922,10 +926,20 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     # Read off the final row alone it collapsed to ~0 on 30 of 81 frames, took
     # V_disk's confidence to zero with it, and quarantined the entire second
     # half of a run whose volumes were in fact smooth to better than 1%.
+    #   - the full left-to-right EXTENT of a thin band, not the width of the
+    #     last few rows.  A bead's bottom edge is rarely level with the mat
+    #     row: the mat is tilted a little (0.5 deg is 16 px across a 1800 px
+    #     bead) or the edge is wavy, so the last rows above the mat row cross
+    #     only part of the bead and read as a narrow base.  On f88%_8hr_2 that
+    #     put base_taper at 0.33 on a silhouette that met the mat at both
+    #     corners, and cost V_disk its vote on a flat-mat run where V_disk and
+    #     V_extrap agreed to 1-2%.  The band's extent reaches both corners
+    #     whatever the tilt; a base really lost to shadow, where both sides
+    #     curl inward before the mat, still reads narrow.
     above = Y <= y_base_eff + 0.5
-    w_t = w[above] if above.any() else w
-    k = int(min(5, len(w_t)))
-    w_contact = float(np.median(w_t[-k:]))
+    Ya, xla, xra = (Y[above], xl[above], xr[above]) if above.any() else (Y, xl, xr)
+    band = Ya >= Ya[-1] - max(BASE_BAND_MIN_PX, BASE_BAND_FRAC * h_px)
+    w_contact = float(min(xra[band].max() - xla[band].min() + 1.0, w.max()))
     m["base_taper"] = float(w_contact / w.max()) if w.max() else np.nan
 
     # The CONTACT radius -- the half-width where the bead meets the mat -- as
