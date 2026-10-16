@@ -133,6 +133,14 @@ def place_end_labels(ax, items, pad_frac=0.052):
             ax.plot([x, x], [y, yy], lw=0.8, color=colour, alpha=0.55, zorder=1)
 
 
+def legend_below(ax, ncol=4):
+    """Legend under the x axis label, where it can never cover a point.
+    save_fig crops with bbox_inches="tight", so it stays in the picture."""
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(frameon=False, fontsize=9, ncol=ncol, loc="upper left",
+                  bbox_to_anchor=(0.0, -0.16))
+
+
 def tidy(ax, title=None, xlabel=None, ylabel=None):
     if title:
         ax.set_title(title, loc="left", pad=10, color=INK)
@@ -198,10 +206,11 @@ def plot_vs_time(df, info, out, col, title, ylabel, headline="final  {v:+.2f}%",
         add_image_number_axis(ax, df, t)
     if headline:
         fin = y[use][-1] if use.any() and np.isfinite(y[use]).any() else np.nan
-        ax.text(0.99, 0.97, headline.format(v=fin), transform=ax.transAxes,
-                ha="right", va="top", fontsize=13, fontweight="bold", color=INK)
-    ax.legend(frameon=False, fontsize=9, loc="lower left", ncol=2,
-              bbox_to_anchor=(0.0, -0.02))
+        # in the title row, not on the plot: inside the axes the points of a
+        # rising curve run straight through it (mat_height.png, 88% f-sets)
+        ax.set_title(headline.format(v=fin), loc="right", pad=10, fontsize=13,
+                     fontweight="bold", color=INK)
+    legend_below(ax, ncol=4)
     fig.tight_layout()
     save_fig(fig, out)
     plt.close(fig)
@@ -245,9 +254,9 @@ def plot_shape_strain(df, info, out):
             note = (f"vertical {ez:+.1f}%  vs  radial {er:+.1f}%   =  {ez/er:.1f}x"
                     if ez / er > 1.25 else
                     f"vertical {ez:+.1f}%  vs  radial {er:+.1f}%   (near isotropic)")
-            ax.text(0.01, 0.04, note, transform=ax.transAxes, fontsize=11,
-                    fontweight="bold", color=INK)
-    ax.legend(frameon=False, fontsize=9, loc="upper right")
+            ax.set_title(note, loc="right", pad=10, fontsize=10, fontweight="bold",
+                         color=INK)
+    legend_below(ax, ncol=4)
     fig.tight_layout()
     save_fig(fig, out)
     plt.close(fig)
@@ -338,7 +347,7 @@ def plot_volumes(df, info, out):
     # direct labels last, once the limits are final: the contrast WARN on two
     # of these four slots is relieved by a visible label, not by the legend
     place_end_labels(ax, ends)
-    ax.legend(frameon=False, fontsize=9, loc="best")
+    legend_below(ax, ncol=4)
     fig.tight_layout()
     save_fig(fig, out)
     plt.close(fig)
@@ -650,16 +659,16 @@ def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="an
         ("height.png", lambda o: plot_vs_time(
             df, info, o, "h_um" if um else "h_px", "Bead height",
             "height (um)" if um else "height (px)",
-            headline="final  {v:,.0f}", colour=SERIES["V_disk"], zero_line=False)),
+            headline="final  {v:,.0f} " + ("um" if um else "px"), colour=SERIES["V_disk"], zero_line=False)),
         ("base_radius.png", lambda o: plot_vs_time(
             df, info, o, "a_um" if um else "a_px", "Bead base radius",
             "base radius (um)" if um else "base radius (px)",
-            headline="final  {v:,.0f}", colour=SERIES["V_extrap"], zero_line=False)),
+            headline="final  {v:,.0f} " + ("um" if um else "px"), colour=SERIES["V_extrap"], zero_line=False)),
         ("shape_strain.png", lambda o: plot_shape_strain(df, info, o)),
         ("mat_height.png", lambda o: plot_vs_time(
             df, info, o, "mat_rise_um" if um else "mat_rise_px",
             "How far the mat edge has risen", "mat rise (um)" if um else "mat rise (px)",
-            headline="final  {v:+,.0f}", colour=SERIES["V_disk"])
+            headline="final  {v:+,.0f} " + ("um" if um else "px"), colour=SERIES["V_disk"])
             if "mat_rise_px" in df.columns else None),
         ("volumes.png", lambda o: plot_volumes(df, info, o)),
         ("agreement.png", lambda o: plot_agreement(df, info, o)),
