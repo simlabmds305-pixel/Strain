@@ -879,6 +879,10 @@ def volumes_for(frame, y_base, baseline_conf, cfg):
     m["n_rows"] = int(len(Y))
     m["Y_apex_full"] = int(Y[0])
     m["Y_widest_full"] = int(Y[i_w])
+    # where the tracked points sit, for the height / radius contact sheets
+    m["x_apex_full"] = float((xl[0] + xr[0]) / 2.0)
+    m["x_left_widest_full"] = float(xl[i_w])
+    m["x_right_widest_full"] = float(xr[i_w])
     m["Y_bottom_full"] = int(Y[-1])
     m["clipped_at_mat"] = bool(frame.get("clipped_at_mat", False))
     m["clip_refused"] = bool(frame.get("clip_refused", False))

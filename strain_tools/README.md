@@ -130,6 +130,9 @@ Outputs, written into `<folder>/analysis/`:
 | `shape_strain.png` | vertical, radial and isotropic-equivalent strain on one axis |
 | `volumes.png` | all four estimators over the run |
 | `agreement.png` | how far apart the deciding estimators were, frame by frame |
+| `mat_height.png` | how far the mat edge has risen |
+| `height_track.png` | contact sheet, up to 50 frames zoomed on the top of the bead: red + = top, cyan dashed = first frame, yellow bar = how far it has come down; title = time, height, change, confidence |
+| `radius_track.png` | the same for the left and right edge at the widest row: yellow bars = how far each side has moved in |
 | `per_image.csv` | every number for every frame |
 | `summary.txt` | the headline, the verdict counts, and the warnings |
 | `settings.json` | exactly what was used, so a run can be reproduced |
