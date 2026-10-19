@@ -218,22 +218,18 @@ def plot_vs_time(df, info, out, col, title, ylabel, headline="final  {v:+.2f}%",
 
 TRACK_PANELS = 50        # at most this many frames on a contact sheet
 TRACK_COLS = 5
-TRACK_MIN_WIN = 200      # px: smallest zoom window around a tracked point
 
 
 def plot_track_sheets(df, info, outdir):
     """Two contact sheets, height_track.png and radius_track.png: one panel per
-    sampled frame, zoomed on the tracked point, against where it was on the
-    first frame -- the way the cantilever app shows deflection.
+    sampled frame showing the cropped picture (the box drawn for the run), with
+    the tracked point against where it was on the first frame -- the way the
+    cantilever app shows deflection.
 
-    Zoomed because the whole crop hides the change: over a run the top drops
-    ~75 px and each side moves in ~50 px of a 1900 x 900 px crop.
-
-    height: a window round the top of the bead.  cyan dashed = first frame's
-      apex row, red + = this frame's apex, yellow bar = how far the top moved.
-    radius: the left and the right edge at the widest row, side by side.
-      cyan dashed = first frame's edges, red + = this frame's, yellow bars =
-      how far each side moved in.
+    height: cyan dashed = first frame's top of the bead, red + = this frame's
+      top, yellow bar = how far it has come down, white dotted = mat row.
+    radius: cyan dashed = first frame's left and right edge at the widest row,
+      red + = this frame's edges, yellow bars = how far each side moved in.
     Panel title: time, value, change since the first frame, confidence.
     """
     import cv2
@@ -253,92 +249,70 @@ def plot_track_sheets(df, info, outdir):
     f0 = u.iloc[0]
     um = "um" if cfg.get("SCALE_PX_PER_UM") else "px"
 
-    # windows, fixed for the whole sheet so every panel is to the same scale
-    ya = u["Y_apex_full"].to_numpy(float)
-    ha = max(TRACK_MIN_WIN, 1.6 * np.ptp(ya) + 160)            # height window, tall
-    hy0 = float(ya.min()) - 0.25 * ha
-    hx0 = float(f0["x_apex_full"]) - 0.75 * ha
-    yw = u["Y_widest_full"].to_numpy(float)
-    moves = np.r_[np.abs(u["x_left_widest_full"] - f0["x_left_widest_full"]),
-                  np.abs(u["x_right_widest_full"] - f0["x_right_widest_full"])]
-    s = max(TRACK_MIN_WIN, 2.4 * float(np.nanmax(moves)) + 120, np.ptp(yw) + 120)
-    ry0 = float(np.median(yw)) - s / 2
-    lx0 = float(f0["x_left_widest_full"]) - 0.35 * s            # edge sits left of
-    rx0 = float(f0["x_right_widest_full"]) - 0.65 * s           # centre, inward side
-    gap = max(4, int(0.03 * s))
-
-    def window(img, x0, y0, w, h):
-        H, W = img.shape
-        xa, ya_ = int(round(x0)), int(round(y0))
-        xb, yb = xa + int(round(w)), ya_ + int(round(h))
-        out = np.zeros((yb - ya_, xb - xa), np.uint8)
-        sx0, sy0, sx1, sy1 = max(0, xa), max(0, ya_), min(W, xb), min(H, yb)
-        if sx1 > sx0 and sy1 > sy0:
-            out[sy0 - ya_:sy1 - ya_, sx0 - xa:sx1 - xa] = img[sy0:sy1, sx0:sx1]
-        return out
+    g0 = cv2.imread(f0["path"], cv2.IMREAD_GRAYSCALE)
+    if g0 is None:
+        return
+    H, W = g0.shape
+    x0, x1, y0, y1 = cfg.get("ROI") or (0, W, 0, H)
+    x0, x1, y0, y1 = max(0, int(x0)), min(W, int(x1)), max(0, int(y0)), min(H, int(y1))
+    aspect = (y1 - y0) / max(1, x1 - x0)
 
     nrow = int(np.ceil(len(pick) / TRACK_COLS))
     pw = 3.0
-    fh, ah = plt.subplots(nrow, TRACK_COLS, figsize=(TRACK_COLS * pw, nrow * pw * 0.72 + 0.3),
-                          squeeze=False)
-    fr, ar = plt.subplots(nrow, TRACK_COLS, figsize=(TRACK_COLS * pw, nrow * pw * 0.55 + 0.3),
-                          squeeze=False)
+    size = (TRACK_COLS * pw, nrow * (pw * aspect + 0.35) + 0.3)
+    fh, ah = plt.subplots(nrow, TRACK_COLS, figsize=size, squeeze=False)
+    fr, ar = plt.subplots(nrow, TRACK_COLS, figsize=size, squeeze=False)
     for ax in list(ah.flat) + list(ar.flat):
         ax.axis("off")
     cyan, yel, red = "#22d3ee", "#facc15", "#ef4444"
-    mk = dict(ms=8, mew=1.6, zorder=5)
+    mk = dict(ms=7, mew=1.5, zorder=5)
+    bar = dict(lw=3, solid_capstyle="butt", zorder=4)
 
     for k, i in enumerate(pick):
         r = u.iloc[i]
         g = cv2.imread(r["path"], cv2.IMREAD_GRAYSCALE)
         if g is None:
             continue
+        crop = g[y0:y1, x0:x1]
         conf = max((float(r.get(f"conf_{c}", np.nan)) for c in deciders), default=np.nan)
         tl = f"t={float(r['t_s']):.0f}s" if timed else f"#{int(r['index'])}"
+        for ax in (ah.flat[k], ar.flat[k]):
+            ax.axis("on")
+            ax.imshow(crop, cmap="gray", vmin=0, vmax=255, extent=(x0, x1, y1, y0))
+            ax.set_xlim(x0, x1)
+            ax.set_ylim(y1, y0)
+            ax.tick_params(labelsize=6)
+            ax.set_xticks([])
 
         # ---- height
         ax = ah.flat[k]
-        ax.axis("on")
-        win = window(g, hx0, hy0, 1.5 * ha, ha)
-        ax.imshow(win, cmap="gray", vmin=0, vmax=255,
-                  extent=(hx0, hx0 + 1.5 * ha, hy0 + ha, hy0))
         y_ref, y_now, x_now = float(f0["Y_apex_full"]), float(r["Y_apex_full"]), float(r["x_apex_full"])
         ax.axhline(y_ref, color=cyan, ls="--", lw=1.0)
-        ax.plot([x_now, x_now], [y_ref, y_now], color=yel, lw=3, solid_capstyle="butt", zorder=4)
+        if np.isfinite(r.get("baseline_y", np.nan)):
+            ax.axhline(float(r["baseline_y"]), color="white", ls=":", lw=0.9)
+        ax.plot([x_now, x_now], [y_ref, y_now], color=yel, **bar)
         ax.plot(x_now, y_now, "+", color=red, **mk)
         d = float(r["h_um"]) - float(f0["h_um"])
         ax.set_title(f"{tl}   h {float(r['h_um']):,.0f} {um}   {d:+.1f}   cf {conf:.2f}",
                      fontsize=7.5)
-        ax.tick_params(labelsize=6)
-        ax.set_xticks([])
 
-        # ---- radius: left window | gap | right window
+        # ---- radius
         ax = ar.flat[k]
-        ax.axis("on")
-        L = window(g, lx0, ry0, s, s)
-        R = window(g, rx0, ry0, s, s)
-        comp = np.hstack([L, np.full((L.shape[0], gap), 255, np.uint8), R])
-        ax.imshow(comp, cmap="gray", vmin=0, vmax=255, extent=(0, comp.shape[1], s, 0))
-        yy = float(r["Y_widest_full"]) - ry0
-        for x_ref, x_now, off in ((f0["x_left_widest_full"], r["x_left_widest_full"], -lx0),
-                                  (f0["x_right_widest_full"], r["x_right_widest_full"],
-                                   -rx0 + s + gap)):
-            xr_, xn = float(x_ref) + off, float(x_now) + off
-            ax.axvline(xr_, color=cyan, ls="--", lw=1.0)
-            ax.plot([xr_, xn], [yy, yy], color=yel, lw=3, solid_capstyle="butt", zorder=4)
-            ax.plot(xn, yy, "+", color=red, **mk)
+        yw = float(r["Y_widest_full"])
+        for c0, c in ((float(f0["x_left_widest_full"]), float(r["x_left_widest_full"])),
+                      (float(f0["x_right_widest_full"]), float(r["x_right_widest_full"]))):
+            ax.axvline(c0, color=cyan, ls="--", lw=1.0)
+            ax.plot([c0, c], [yw, yw], color=yel, **bar)
+            ax.plot(c, yw, "+", color=red, **mk)
         d = float(r["a_um"]) - float(f0["a_um"])
         ax.set_title(f"{tl}   r {float(r['a_um']):,.0f} {um}   {d:+.1f}   cf {conf:.2f}",
                      fontsize=7.5)
-        ax.set_xticks([])
-        ax.set_yticks([])
 
-    fh.suptitle("bead height, zoomed on the top: red + = top of the bead, cyan dashed = first "
-                "frame, yellow bar = how far it moved;  title: height (top to mat) and change",
+    fh.suptitle("bead height: red + = top of the bead, cyan dashed = first frame, yellow bar "
+                "= how far it came down, white dotted = mat;  title: height (top to mat), change",
                 fontsize=9.5, color=INK)
-    fr.suptitle("bead radius at the widest row, left edge | right edge: red + = edge, cyan "
-                "dashed = first frame, yellow bars = how far each side moved in",
-                fontsize=9.5, color=INK)
+    fr.suptitle("bead radius at the widest row: red + = edges, cyan dashed = first frame, "
+                "yellow bars = how far each side moved in", fontsize=9.5, color=INK)
     for fig, name in ((fh, "height_track.png"), (fr, "radius_track.png")):
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         save_fig(fig, os.path.join(outdir, name))
