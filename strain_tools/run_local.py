@@ -218,23 +218,24 @@ def plot_vs_time(df, info, out, col, title, ylabel, headline="final  {v:+.2f}%",
 
 TRACK_PANELS = 50        # at most this many frames on a contact sheet
 TRACK_COLS = 5
+TRACK_INSET = (0.30, 0.46)   # magnifier size, as a fraction of the panel (w, h)
 
 
 def plot_track_sheets(df, info, outdir):
     """Two contact sheets, height_track.png and radius_track.png: one panel per
-    sampled frame showing the cropped picture (the box drawn for the run), with
-    the tracked point against where it was on the first frame -- the way the
-    cantilever app shows deflection.
+    sampled frame showing the cropped picture (the box drawn for the run).
 
-    height: cyan dashed = first frame's top of the bead, red + = this frame's
-      top, yellow bar = how far it has come down, white dotted = mat row.
-    radius: cyan dashed = first frame's left and right edge at the widest row,
-      red + = this frame's edges, yellow bars = how far each side moved in.
+    At true scale a run's change is small against the crop (~75 px of 900 for
+    the height), so each panel also shows
+      - the first frame's outline (cyan dashed) and this frame's (red), with
+        the band the bead has lost since the first frame filled yellow;
+      - a magnifier in the top corner(s) on the tracked point: the top of the
+        bead (height), or the left and right edge at the widest row (radius),
+        with the first frame's position (cyan) and this frame's (red +).
     Panel title: time, value, change since the first frame, confidence.
     """
-    import cv2
     need = {"Y_apex_full", "x_apex_full", "x_left_widest_full", "x_right_widest_full",
-            "Y_widest_full", "h_um", "a_um", "path"}
+            "Y_widest_full", "h_um", "a_um", "path", "baseline_y"}
     u = df[df["use"]] if df["use"].any() else df
     if not need <= set(u.columns) or len(u) < 2:
         return
@@ -248,37 +249,112 @@ def plot_track_sheets(df, info, outdir):
     deciders = list(info.get("deciders", []))
     f0 = u.iloc[0]
     um = "um" if cfg.get("SCALE_PX_PER_UM") else "px"
+    cyan, yel, red = "#22d3ee", "#facc15", "#ef4444"
 
-    g0 = cv2.imread(f0["path"], cv2.IMREAD_GRAYSCALE)
-    if g0 is None:
+    def outline(row):
+        """Grey crop and the bead's silhouette above the floor, crop coords."""
+        m = bp.measure_one((row["path"], cfg, True))
+        if not m.get("ok"):
+            return None
+        x0_, x1_, y0_, y1_ = m["roi"]
+        mask = m["mask"] > 0
+        cut = int(round(float(row["baseline_y"]) - y0_)) + 1
+        if 0 <= cut < mask.shape[0]:
+            mask[cut:] = False
+        return m["img"], mask, (x0_, x1_, y0_, y1_)
+
+    first = outline(f0)
+    if first is None:
         return
-    H, W = g0.shape
-    x0, x1, y0, y1 = cfg.get("ROI") or (0, W, 0, H)
-    x0, x1, y0, y1 = max(0, int(x0)), min(W, int(x1)), max(0, int(y0)), min(H, int(y1))
-    aspect = (y1 - y0) / max(1, x1 - x0)
+    _, mask0, (x0, x1, y0, y1) = first
+    cw, ch = x1 - x0, y1 - y0
+    X, Y = np.arange(x0, x0 + mask0.shape[1]), np.arange(y0, y0 + mask0.shape[0])
+
+    # magnifier windows, fixed for the whole sheet so every panel is to scale
+    iw, ih = TRACK_INSET
+    ratio = (iw * cw) / (ih * ch)            # data w/h that fills the inset box
+    ya = u["Y_apex_full"].to_numpy(float)
+    hh = max(120.0, 2.6 * np.ptp(ya) + 60)
+    hwin = (float(f0["x_apex_full"]) - hh * ratio / 2, float(ya.min()) - 0.25 * hh, hh * ratio, hh)
+    yw = u["Y_widest_full"].to_numpy(float)
+    mv = max(float(np.nanmax(np.abs(u["x_left_widest_full"] - f0["x_left_widest_full"]))),
+             float(np.nanmax(np.abs(u["x_right_widest_full"] - f0["x_right_widest_full"]))))
+    rw = max(100.0, 3.0 * mv + 60, (np.ptp(yw) + 60) * ratio)
+    rh = rw / ratio
+    rcy = float(np.median(yw))
+    ry = float(np.clip(rcy - rh / 2, y0, max(y0, y1 - rh)))     # stay inside the crop
+    lwin = (float(f0["x_left_widest_full"]) - 0.4 * rw, ry, rw, rh)
+    rwin = (float(f0["x_right_widest_full"]) - 0.6 * rw, ry, rw, rh)
+    hwin = (hwin[0], float(np.clip(hwin[1], y0, max(y0, y1 - hwin[3]))), hwin[2], hwin[3])
 
     nrow = int(np.ceil(len(pick) / TRACK_COLS))
     pw = 3.0
-    size = (TRACK_COLS * pw, nrow * (pw * aspect + 0.35) + 0.3)
+    size = (TRACK_COLS * pw, nrow * (pw * ch / cw + 0.35) + 0.3)
     fh, ah = plt.subplots(nrow, TRACK_COLS, figsize=size, squeeze=False)
     fr, ar = plt.subplots(nrow, TRACK_COLS, figsize=size, squeeze=False)
     for ax in list(ah.flat) + list(ar.flat):
         ax.axis("off")
-    cyan, yel, red = "#22d3ee", "#facc15", "#ef4444"
-    mk = dict(ms=7, mew=1.5, zorder=5)
-    bar = dict(lw=3, solid_capstyle="butt", zorder=4)
+
+    stride = max(1, int(np.ceil(cw / 500)))   # main panels at screen size: 50 full-res
+                                              # layers per sheet run out of memory
+
+    def draw(ax, img, mask, lw=1.0, win=None):
+        """Crop, lost band and both outlines; `win` = (x, y, w, h) draws only
+        that window at full resolution (the magnifier), else the whole crop
+        at screen size."""
+        if win is None:
+            sl = (slice(None, None, stride), slice(None, None, stride))
+            ext = (x0, x1, y1, y0)
+            xs, ys = X[::stride], Y[::stride]
+        else:
+            wx, wy, ww, wh = win
+            c0, c1 = max(0, int(wx - x0) - 2), min(cw, int(wx + ww - x0) + 2)
+            r0, r1 = max(0, int(wy - y0) - 2), min(ch, int(wy + wh - y0) + 2)
+            if c1 <= c0 or r1 <= r0:
+                return
+            sl = (slice(r0, r1), slice(c0, c1))
+            ext = (x0 + c0, x0 + c1, y0 + r1, y0 + r0)
+            xs, ys = X[c0:c1], Y[r0:r1]
+        m0, m1 = mask0[sl], mask[sl]
+        ax.imshow(img[sl], cmap="gray", vmin=0, vmax=255, extent=ext)
+        lost = m0 & ~m1
+        if lost.any():
+            over = np.zeros(m1.shape + (4,), np.uint8)
+            over[lost] = (250, 204, 21, 190)
+            ax.imshow(over, extent=ext, interpolation="nearest")
+        if m0.any() and not m0.all():
+            ax.contour(xs, ys, m0, levels=[0.5], colors=[cyan], linewidths=lw, linestyles="--")
+        if m1.any() and not m1.all():
+            ax.contour(xs, ys, m1, levels=[0.5], colors=[red], linewidths=lw)
+
+    def magnifier(ax, img, mask, win, rect, points):
+        ins = ax.inset_axes(rect)
+        ins.set_facecolor("black")
+        draw(ins, img, mask, lw=1.4, win=win)
+        for (xr_, yr_, xn, yn) in points:
+            ins.plot([xr_, xn], [yr_, yn], color=yel, lw=2.5, zorder=4)
+            ins.plot(xn, yn, "+", color=red, ms=9, mew=1.8, zorder=5)
+        wx, wy, ww, wh = win
+        ins.set_xlim(wx, wx + ww)
+        ins.set_ylim(wy + wh, wy)
+        ins.set_xticks([])
+        ins.set_yticks([])
+        for sp in ins.spines.values():
+            sp.set_edgecolor(yel)
+            sp.set_linewidth(1.2)
+        ax.add_patch(plt.Rectangle((wx, wy), ww, wh, fill=False, ec=yel, lw=0.8, ls=":"))
 
     for k, i in enumerate(pick):
         r = u.iloc[i]
-        g = cv2.imread(r["path"], cv2.IMREAD_GRAYSCALE)
-        if g is None:
+        got = outline(r)
+        if got is None:
             continue
-        crop = g[y0:y1, x0:x1]
+        img, mask, _ = got
         conf = max((float(r.get(f"conf_{c}", np.nan)) for c in deciders), default=np.nan)
         tl = f"t={float(r['t_s']):.0f}s" if timed else f"#{int(r['index'])}"
         for ax in (ah.flat[k], ar.flat[k]):
             ax.axis("on")
-            ax.imshow(crop, cmap="gray", vmin=0, vmax=255, extent=(x0, x1, y1, y0))
+            draw(ax, img, mask)
             ax.set_xlim(x0, x1)
             ax.set_ylim(y1, y0)
             ax.tick_params(labelsize=6)
@@ -286,33 +362,31 @@ def plot_track_sheets(df, info, outdir):
 
         # ---- height
         ax = ah.flat[k]
-        y_ref, y_now, x_now = float(f0["Y_apex_full"]), float(r["Y_apex_full"]), float(r["x_apex_full"])
-        ax.axhline(y_ref, color=cyan, ls="--", lw=1.0)
-        if np.isfinite(r.get("baseline_y", np.nan)):
-            ax.axhline(float(r["baseline_y"]), color="white", ls=":", lw=0.9)
-        ax.plot([x_now, x_now], [y_ref, y_now], color=yel, **bar)
-        ax.plot(x_now, y_now, "+", color=red, **mk)
+        ax.axhline(float(r["baseline_y"]), color="white", ls=":", lw=0.9)
+        magnifier(ax, img, mask, hwin, (0.0, 1 - ih, iw, ih),
+                  [(float(r["x_apex_full"]), float(f0["Y_apex_full"]),
+                    float(r["x_apex_full"]), float(r["Y_apex_full"]))])
         d = float(r["h_um"]) - float(f0["h_um"])
         ax.set_title(f"{tl}   h {float(r['h_um']):,.0f} {um}   {d:+.1f}   cf {conf:.2f}",
                      fontsize=7.5)
 
-        # ---- radius
+        # ---- radius: left edge magnified top-left, right edge top-right
         ax = ar.flat[k]
-        yw = float(r["Y_widest_full"])
-        for c0, c in ((float(f0["x_left_widest_full"]), float(r["x_left_widest_full"])),
-                      (float(f0["x_right_widest_full"]), float(r["x_right_widest_full"]))):
-            ax.axvline(c0, color=cyan, ls="--", lw=1.0)
-            ax.plot([c0, c], [yw, yw], color=yel, **bar)
-            ax.plot(c, yw, "+", color=red, **mk)
+        yy = float(r["Y_widest_full"])
+        magnifier(ax, img, mask, lwin, (0.0, 1 - ih, iw, ih),
+                  [(float(f0["x_left_widest_full"]), yy, float(r["x_left_widest_full"]), yy)])
+        magnifier(ax, img, mask, rwin, (1 - iw, 1 - ih, iw, ih),
+                  [(float(f0["x_right_widest_full"]), yy, float(r["x_right_widest_full"]), yy)])
         d = float(r["a_um"]) - float(f0["a_um"])
         ax.set_title(f"{tl}   r {float(r['a_um']):,.0f} {um}   {d:+.1f}   cf {conf:.2f}",
                      fontsize=7.5)
 
-    fh.suptitle("bead height: red + = top of the bead, cyan dashed = first frame, yellow bar "
-                "= how far it came down, white dotted = mat;  title: height (top to mat), change",
+    common = ("cyan dashed = first frame's outline, red = this frame's, yellow = what the bead "
+              "has lost; corner = magnified")
+    fh.suptitle("bead height  |  " + common + " top of the bead (yellow bar = drop)",
                 fontsize=9.5, color=INK)
-    fr.suptitle("bead radius at the widest row: red + = edges, cyan dashed = first frame, "
-                "yellow bars = how far each side moved in", fontsize=9.5, color=INK)
+    fr.suptitle("bead radius  |  " + common + " left / right edge at the widest row",
+                fontsize=9.5, color=INK)
     for fig, name in ((fh, "height_track.png"), (fr, "radius_track.png")):
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         save_fig(fig, os.path.join(outdir, name))
