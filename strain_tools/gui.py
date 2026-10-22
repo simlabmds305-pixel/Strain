@@ -132,6 +132,13 @@ class App:
         se.grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
         se.bind("<FocusOut>", lambda _e: self.load_folder(keep_roi=True))
         se.bind("<Return>", lambda _e: self.load_folder(keep_roi=True))
+        ttk.Label(opt, text="Threshold offset:").grid(row=5, column=0, sticky="w")
+        self.toff = tk.StringVar(value="0")
+        ttk.Entry(opt, textvariable=self.toff, width=8).grid(row=5, column=1, sticky="w",
+                                                             padx=6)
+        ttk.Label(opt, text="0 = automatic.  Negative (e.g. -40) includes darker parts of the "
+                  "bead - use it when the outline stops above the mat on a wet, dark-bottomed "
+                  "bead.", foreground="#555").grid(row=5, column=2, columnspan=4, sticky="w")
 
         # ---- run
         run = ttk.Frame(root)
@@ -219,6 +226,7 @@ class App:
             # the same place in every set, so another set's crop is not offered)
             per = self.saved.get("rois", {})
             per2 = self.saved.get("rois_last", {})
+            self.toff.set(str(self.saved.get("thresh_offsets", {}).get(d, 0)))
             self.roi2 = tuple(per2[d]) if d in per2 else None
             self.own_crop.set(self.roi2 is not None)
             self.set_roi(tuple(per[d]) if d in per else None)
@@ -342,8 +350,13 @@ class App:
         except ValueError:
             self.status.set("Seconds between images must be a number.")
             return
+        try:
+            toff = int(float(self.toff.get() or 0))
+        except ValueError:
+            self.status.set("Threshold offset must be a whole number, e.g. 0 or -40.")
+            return
         cfg = dict(SCALE_PX_PER_UM=bp.DEFAULTS["SCALE_PX_PER_UM"], ROI=self.roi,
-                   INVERT=False, MANUAL_THRESH=None, THRESH_OFFSET=0, SEGMENT_METHOD="otsu",
+                   INVERT=False, MANUAL_THRESH=None, THRESH_OFFSET=toff, SEGMENT_METHOD="otsu",
                    MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"], BASELINE="blue",
                    BASELINE_TUNE=0.0, MAT_MODE="auto", CLIP_AT_BASELINE=True,
                    INTERVAL_S=iv, TIME_REGEX=None)
@@ -351,12 +364,15 @@ class App:
         if self.roi:
             rois[d] = list(self.roi)
         pair_roi = self.roi2 if self.own_crop.get() and self.roi2 else None
+        toffs = dict(self.saved.get("thresh_offsets", {}))
+        toffs[d] = toff
         rois_last = dict(self.saved.get("rois_last", {}))
         if pair_roi:
             rois_last[d] = list(pair_roi)
         else:
             rois_last.pop(d, None)
         self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois, rois_last=rois_last,
+                          thresh_offsets=toffs,
                           last_is_final=self.last_final.get(),
                           roi=list(self.roi) if self.roi else None)
         rl.save_settings(self.saved)

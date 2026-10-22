@@ -648,6 +648,9 @@ def write_report(df, info, outdir):
     L.append(f"  scale             {cfg['SCALE_PX_PER_UM']} px/um"
              f"   (1 px = {1/cfg['SCALE_PX_PER_UM']:.4f} um)")
     L.append(f"  crop              {cfg['ROI'] or 'whole frame'}")
+    if cfg.get("THRESH_OFFSET"):
+        L.append(f"  threshold offset  {cfg['THRESH_OFFSET']:+d}   (added to the automatic level; "
+                 f"negative takes in darker parts of the bead)")
     if info.get("baseline_moving"):
         a, b = info["baseline_range"]
         L.append(f"  mat row           Y = {a:.0f} -> {b:.0f}, "
