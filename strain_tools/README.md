@@ -70,6 +70,24 @@ risen by then, it hides the bottom of the bead, the final volume is measured
 only above it, and that strain is too large. `results.txt` warns when this
 happens.
 
+## Tracing the first frames by hand (separate tool)
+
+For sets whose first, wet photos are so dark at the base that the automatic
+outline stops above the mat (the f90 sets): run the set in the window first,
+then double-click **`Trace Bead.bat`** (or `pythonw manual_trace.py`), choose
+the set and how many of the first frames to trace. The last frame is added as
+a check on your hand.
+
+Each frame is shown brightened, with the app's outline (red) and the mat row
+(cyan dashed). Click round the bead from one foot over the top to the other
+foot; right-click undoes, `g` toggles brightness, Enter saves and moves on,
+`n` skips, `q` finishes. Your outline's volume is computed the same way as
+`V_disk` (stack of discs cut at the mat row) and written to
+`analysis/manual_trace/` with a picture per frame and `manual_summary.txt`:
+the strain from your traced start to the app's last frame, from your traced
+start to your traced last frame (same hand at both ends), and how close your
+trace of the last frame is to the app's. Nothing else is changed.
+
 ## Running it on your own machine
 
 ```bash
