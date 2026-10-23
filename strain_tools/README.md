@@ -80,7 +80,7 @@ a check on your hand.
 
 Each frame is shown brightened, with the app's outline (red) and the mat row
 (cyan dashed). Click round the bead from one foot over the top to the other
-foot; right-click undoes, `g` toggles brightness, Enter saves and moves on,
+foot (click points, or hold the left button and drag to draw freehand); right-click undoes the last click or stroke, `g` toggles brightness, Enter saves and moves on,
 `n` skips, `q` finishes. Your outline's volume is computed the same way as
 `V_disk` (stack of discs cut at the mat row) and written to
 `analysis/manual_trace/` with a picture per frame and `manual_summary.txt`:

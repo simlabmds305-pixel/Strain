@@ -14,7 +14,8 @@
 #      python  manual_trace.py <set folder>
 #
 #  In the window:  left click = add a point on the bead's edge
-#                  right click / Backspace = remove the last point
+#                  hold the left button and drag = draw freehand along it
+#                  right click / Backspace = undo the last click or stroke
 #                  c = clear     g = brighter / normal picture
 #                  Enter = save this frame and go to the next
 #                  n = skip this frame      q = stop and write the results
@@ -82,7 +83,10 @@ class Tracer:
         self.stop = False
         self.fig, self.ax = plt.subplots(figsize=(13, 7.5))
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
+        self.fig.canvas.mpl_connect("motion_notify_event", self.on_move)
+        self.fig.canvas.mpl_connect("button_release_event", self.on_release)
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
+        self.dragging = False
         self.show()
 
     # ---------------------------------------------------------------- frame
@@ -98,10 +102,25 @@ class Tracer:
         x0, x1, y0, y1 = self.roi
         g = cv2.imread(os.path.join(self.folder, name), cv2.IMREAD_GRAYSCALE)
         self.crop = g[y0:y1, x0:x1]
-        self.pts = []
+        self.strokes = []          # each click is a stroke of one point; each drag one stroke
         r = self.row(name)
         self.floor = float(r["baseline_y"]) if r is not None else np.nan
+        self.app_outline = None    # the app's own outline, worked out once per frame
+        try:
+            cfg = json.load(open(os.path.join(self.folder, "analysis", "settings.json")))
+            cfg = {k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg.items()}
+            m = bp.measure_one((os.path.join(self.folder, name), cfg, True))
+            if m.get("ok"):
+                c = outline_of(m["mask"] > 0)
+                if c is not None:
+                    self.app_outline = c + [x0, y0]
+        except Exception:
+            pass
         self.draw()
+
+    @property
+    def pts(self):
+        return [p for st in self.strokes for p in st]
 
     def picture(self):
         if not self.bright:
@@ -120,33 +139,23 @@ class Tracer:
         ax.imshow(self.picture(), cmap="gray", extent=(x0, x1, y1, y0), vmin=0, vmax=255)
         name = self.frames[self.k]
         r = self.row(name)
-        # the app's own outline, for reference
-        try:
-            cfg = json.load(open(os.path.join(self.folder, "analysis", "settings.json")))
-            cfg = {k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg.items()}
-            m = bp.measure_one((os.path.join(self.folder, name), cfg, True))
-            if m.get("ok"):
-                c = outline_of(m["mask"] > 0)
-                if c is not None:
-                    ax.plot(c[:, 0] + x0, c[:, 1] + y0, color="#ef4444", lw=1, alpha=0.8,
-                            label="app's outline")
-        except Exception:
-            pass
+        if self.app_outline is not None:
+            c = self.app_outline
+            ax.plot(c[:, 0], c[:, 1], color="#ef4444", lw=1, alpha=0.8, label="app's outline")
         if np.isfinite(self.floor):
             ax.axhline(self.floor, color="#22d3ee", ls="--", lw=1.2, label="mat row")
-        if self.pts:
-            p = np.array(self.pts)
-            ax.plot(p[:, 0], p[:, 1], "-o", color="#facc15", ms=3, lw=1.5, label="your trace")
-            if len(p) > 2:
-                ax.plot([p[-1, 0], p[0, 0]], [p[-1, 1], p[0, 1]], ":", color="#facc15", lw=1)
+        # the trace is one line whose data is updated in place while dragging
+        self.trace_line, = ax.plot([], [], "-", color="#facc15", lw=1.6, label="your trace")
+        self.dots, = ax.plot([], [], "o", color="#facc15", ms=3)
+        self.update_trace(redraw=False)
         info = ""
         if r is not None:
             s = self.scale ** 3 * 1e9
             info = (f"   app: V_disk {r['V_disk'] / s:.2f}  V_extrap {r['V_extrap'] / s:.2f} mm3")
         ax.set_title(f"[{self.k + 1}/{len(self.frames)}]  {name}{info}\n"
-                     "click round the bead from one foot over the top to the other foot (the "
-                     "mat row closes it).  right-click: undo   g: brightness   Enter: save   "
-                     "n: skip   q: finish", fontsize=9)
+                     "click points or hold and drag along the edge, from one foot over the top "
+                     "to the other (the mat row closes it).  right-click: undo last click/stroke"
+                     "   g: brightness   Enter: save   n: skip   q: finish", fontsize=9)
         ax.legend(loc="upper right", fontsize=8)
         if lims:
             ax.set_xlim(lims[0])
@@ -155,22 +164,53 @@ class Tracer:
         self.fig.canvas.draw_idle()
 
     # ---------------------------------------------------------------- input
+    FREEHAND_STEP = 4.0     # px between recorded points while dragging
+
+    def update_trace(self, redraw=True):
+        p = np.array(self.pts) if self.pts else np.empty((0, 2))
+        self.trace_line.set_data(p[:, 0], p[:, 1]) if len(p) else self.trace_line.set_data([], [])
+        # dots only where single clicks were made, so a drawn stroke stays a clean line
+        clicks = np.array([st[0] for st in self.strokes if len(st) == 1]) \
+            if any(len(st) == 1 for st in self.strokes) else np.empty((0, 2))
+        self.dots.set_data(clicks[:, 0], clicks[:, 1]) if len(clicks) else self.dots.set_data([], [])
+        if redraw:
+            self.fig.canvas.draw_idle()
+
+    def _toolbar_busy(self):
+        tb = getattr(self.fig.canvas.manager, "toolbar", None)
+        return bool(tb is not None and tb.mode)
+
     def on_click(self, ev):
-        if ev.inaxes is not self.ax or self.fig.canvas.manager.toolbar.mode:
+        if ev.inaxes is not self.ax or self._toolbar_busy() or ev.xdata is None:
             return
         if ev.button == 1:
-            self.pts.append((ev.xdata, ev.ydata))
-        elif ev.button == 3 and self.pts:
-            self.pts.pop()
-        self.draw()
+            self.strokes.append([(ev.xdata, ev.ydata)])
+            self.dragging = True
+        elif ev.button == 3 and self.strokes:
+            self.strokes.pop()
+        self.update_trace()
+
+    def on_move(self, ev):
+        if not self.dragging or ev.inaxes is not self.ax or ev.xdata is None:
+            return
+        st = self.strokes[-1]
+        lx, ly = st[-1]
+        if np.hypot(ev.xdata - lx, ev.ydata - ly) >= self.FREEHAND_STEP:
+            st.append((ev.xdata, ev.ydata))
+            self.update_trace()
+
+    def on_release(self, ev):
+        if self.dragging and ev.button == 1:
+            self.dragging = False
+            self.update_trace()
 
     def on_key(self, ev):
-        if ev.key == "backspace" and self.pts:
-            self.pts.pop()
-            self.draw()
+        if ev.key == "backspace" and self.strokes:
+            self.strokes.pop()
+            self.update_trace()
         elif ev.key == "c":
-            self.pts = []
-            self.draw()
+            self.strokes = []
+            self.update_trace()
         elif ev.key == "g":
             self.bright = not self.bright
             self.draw()
