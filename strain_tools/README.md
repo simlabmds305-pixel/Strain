@@ -88,6 +88,28 @@ the strain from your traced start to the app's last frame, from your traced
 start to your traced last frame (same hand at both ends), and how close your
 trace of the last frame is to the app's. Nothing else is changed.
 
+## Master analysis (all sets side by side)
+
+Double-click **`Master Analysis.bat`** (or `python master_analysis.py <data
+folder> [<data folder> ...] [--out DIR]`), choose the data folder(s) holding
+your set folders. Like the Stoney setup's master analysis it reads every set's
+`analysis/` results (nothing is re-measured or changed) and writes, by default
+to `<first data folder>/Master Analysis/`:
+
+- `comparative_master.csv`: one row per set; recipe parsed from the folder
+  name (`[f]<conc>%_<soak>hr_[remarks_]<replicate> (<yyyymmdd>)`, `f` = fresh
+  set with a taped mat), strains by method, verdict counts, drying state, mat
+  rise, shape, offset used, first + last, and whether it was run before a fix;
+- `findings.txt`: repeatability (mean, SD, CV per recipe), factor effects,
+  final photos, anything unusual, sets not confirmed dry, sets with no
+  cross-check;
+- `01_repeatability.png` ... `10_quality.png`.
+
+Replicates are grouped by concentration + soak time, separately for fresh and
+earlier sets; other remarks in the name (nextday, outlier ...) are kept as
+notes. A folder with "discarded" in its name is left out, as is any name listed
+in `exclude.txt` in the output folder.
+
 ## Running it on your own machine
 
 ```bash
