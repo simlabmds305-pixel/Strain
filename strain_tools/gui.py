@@ -177,6 +177,15 @@ class App:
                                 command=lambda: _open(self.res["outdir"]))
         for b in (self.b_sum, self.b_plot, self.b_mat, self.b_pair, self.b_dir):
             b.pack(side="left", padx=3)
+        # master analysis: every set side by side (master_analysis.py)
+        self.b_master = ttk.Button(btns, text="Open master analysis", state="disabled",
+                                   command=lambda: _open(self.master_out()))
+        self.b_master.pack(side="right", padx=3)
+        ttk.Button(btns, text="Master folders...", command=self.master_folders).pack(
+            side="right", padx=3)
+        self.master_busy = False
+        if os.path.isdir(self.master_out() or ""):
+            self.b_master.state(["!disabled"])
 
         if self.folder.get() and os.path.isdir(self.folder.get()):
             self.load_folder()
@@ -408,6 +417,15 @@ class App:
                                     if i < n else "working out strains, plots, first + last...")
                 elif msg[0] == "done":
                     self.finish(msg[1])
+                elif msg[0] == "master_done":
+                    _, out, n = msg
+                    self.master_busy = False
+                    self.status.set(f"master analysis refreshed - {n} sets, in {out}")
+                    self.b_master.state(["!disabled"])
+                elif msg[0] == "master_fail":
+                    self.master_busy = False
+                    self.status.set("master analysis FAILED - see below")
+                    self.out.insert("end", "\n\nMASTER ANALYSIS FAILED\n" + msg[1])
                 elif msg[0] == "fail":
                     self.busy = False
                     self.run_btn.state(["!disabled"])
@@ -428,6 +446,80 @@ class App:
             b.state(["!disabled"])
         if res.get("pairdir"):
             self.b_pair.state(["!disabled"])
+        self.root.after(300, lambda: self.ask_master(res["folder"]))
+
+    # ------------------------------------------------------- master analysis
+    def master_roots(self):
+        return [r for r in self.saved.get("master_roots", []) if os.path.isdir(r)]
+
+    def master_out(self):
+        out = self.saved.get("master_out")
+        if out:
+            return out
+        roots = self.master_roots()
+        return os.path.join(roots[0], "Master Analysis") if roots else None
+
+    def remember_master(self, roots, out=None):
+        self.saved = dict(self.saved, master_roots=roots,
+                          master_out=out or self.saved.get("master_out")
+                          or os.path.join(roots[0], "Master Analysis"))
+        rl.save_settings(self.saved)
+
+    def master_folders(self):
+        """Choose which data folders the master analysis reads."""
+        from tkinter import filedialog, messagebox
+        roots = self.master_roots()
+        txt = "\n".join(roots) or "(none yet)"
+        ans = messagebox.askyesnocancel(
+            "Master analysis folders",
+            f"The master analysis reads every set in:\n\n{txt}\n\n"
+            "Yes = add another data folder\nNo = start the list again\nCancel = keep it",
+            parent=self.root)
+        if ans is None:
+            return
+        if ans is False:
+            roots = []
+        d = filedialog.askdirectory(title="Data folder holding set folders", mustexist=True,
+                                    parent=self.root)
+        if d:
+            d = os.path.normpath(d)
+            if d not in [os.path.normpath(r) for r in roots]:
+                roots.append(d)
+        if roots:
+            out = self.saved.get("master_out") if ans else os.path.join(roots[0],
+                                                                       "Master Analysis")
+            self.remember_master(roots, out)
+            self.status.set("master analysis reads: " + " ; ".join(roots))
+
+    def ask_master(self, set_folder):
+        """After a run: refresh the master analysis?"""
+        from tkinter import messagebox
+        if self.master_busy:
+            return
+        parent = os.path.normpath(os.path.dirname(os.path.normpath(set_folder)))
+        roots = self.master_roots()
+        if parent not in [os.path.normpath(r) for r in roots]:
+            roots = roots + [parent]
+        out = self.master_out() or os.path.join(roots[0], "Master Analysis")
+        if not messagebox.askyesno(
+                "Refresh master analysis?",
+                "Refresh the master analysis (all sets side by side) with this result?\n\n"
+                "Reads every set in:\n" + "\n".join(roots) + f"\n\nWrites to:\n{out}\n\n"
+                "(Use 'Master folders...' to add or change the data folders.)",
+                parent=self.root):
+            return
+        self.remember_master(roots, out)
+        self.master_busy = True
+        self.status.set("refreshing the master analysis...")
+        threading.Thread(target=self.master_work, args=(roots, out), daemon=True).start()
+
+    def master_work(self, roots, out):
+        try:
+            import master_analysis as ma
+            m, _ = ma.run(roots, out)
+            self.q.put(("master_done", out, len(m)))
+        except BaseException as e:
+            self.q.put(("master_fail", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
 
 
 def main():

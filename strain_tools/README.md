@@ -110,6 +110,11 @@ earlier sets; other remarks in the name (nextday, outlier ...) are kept as
 notes. A folder with "discarded" in its name is left out, as is any name listed
 in `exclude.txt` in the output folder.
 
+The window asks after every run whether to refresh the master analysis; Yes
+rebuilds it in the background from the remembered data folders (the run's own
+data folder is added automatically). "Master folders..." adds or resets those
+folders; "Open master analysis" opens the output.
+
 ## Running it on your own machine
 
 ```bash
