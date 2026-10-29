@@ -512,14 +512,20 @@ class App:
             return
         parent = os.path.normpath(os.path.dirname(os.path.normpath(set_folder)))
         roots = self.master_roots()
-        if parent not in [os.path.normpath(r) for r in roots]:
-            roots = roots + [parent]
+        # only the remembered data folders: a run from another folder (older
+        # sets) must not slip into the master analysis.  The run's own folder
+        # is used only when nothing has been chosen yet.
+        if not roots:
+            roots = [parent]
+        elif parent not in [os.path.normpath(r) for r in roots]:
+            self.status.set(f"note: this set's folder ({parent}) is not in the master "
+                            f"analysis - add it with 'Master folders...' if you want it")
         out = self.master_out() or os.path.join(roots[0], "Master Analysis")
         if not messagebox.askyesno(
                 "Refresh master analysis?",
                 "Refresh the master analysis (all sets side by side) with this result?\n\n"
                 "Reads every set in:\n" + "\n".join(roots) + f"\n\nWrites to:\n{out}\n\n"
-                "(Use 'Master folders...' to add or change the data folders.)",
+                "(Only these folders. Use 'Master folders...' to change them.)",
                 parent=self.root):
             return
         self.remember_master(roots, out)
