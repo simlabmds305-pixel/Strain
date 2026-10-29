@@ -762,7 +762,7 @@ def imread(path):
     return cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
 
 
-def save(out_dir, tag, crop, res, params, roi):
+def save(out_dir, tag, crop, res, params, roi, image_wh=None):
     os.makedirs(out_dir, exist_ok=True)
     b = os.path.join(out_dir, tag)
     imwrite(b + "_original.png", crop)
@@ -773,7 +773,7 @@ def save(out_dir, tag, crop, res, params, roi):
     imwrite(b + "_overlay.png", ov)
     stats = network_stats(res["skeleton"])
     with open(b + "_info.json", "w") as f:
-        json.dump(dict(roi_xywh=roi, params=params, stats=stats), f, indent=2)
+        json.dump(dict(roi_xywh=roi, image_wh=image_wh, params=params, stats=stats), f, indent=2)
     print(f"  SAVED -> {b}_enhanced.png  (and _binary, _skeleton, ... in the same folder)")
     print(f"  stats: {stats}")
 
@@ -854,7 +854,7 @@ def run_selected(path, args, k, n):
                 continue
         else:
             res = extract(crop, p, args.paper)
-        save(out_dir, f"{stem}_sel{i}", crop, res, p, [x, y, w, h])
+        save(out_dir, f"{stem}_sel{i}", crop, res, p, [x, y, w, h], [img.shape[1], img.shape[0]])
 
 
 def auto_areas(img, args):
@@ -911,7 +911,8 @@ def run_batch(path, args, kind="auto"):
     imwrite(os.path.join(out_dir, stem + "_crackmap.jpg"), crackmap)
     for i, ((x, y, w, h), p) in enumerate(found, 1):
         crop = img[y:y + h, x:x + w]
-        save(out_dir, f"{stem}_{kind}{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h])
+        save(out_dir, f"{stem}_{kind}{i}", crop, extract(crop, p, args.paper), p, [x, y, w, h],
+             [img.shape[1], img.shape[0]])
 
 
 def main():
@@ -1021,7 +1022,7 @@ def main():
             break
         params = used                                  # carry settings to next hand-drawn area
         if action == "s":
-            save(out_dir, tag, crop, res, used, [x, y, w, h])
+            save(out_dir, tag, crop, res, used, [x, y, w, h], [img.shape[1], img.shape[0]])
     cv2.destroyAllWindows()
 
 
