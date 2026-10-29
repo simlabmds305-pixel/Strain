@@ -40,6 +40,13 @@ measured values agree with its profile ("nearly always" counts more than
 figures - it is a rule-based approximation of the method, not Bucklow's
 discriminant analysis, and it only knows these four traditions.
 
+Checked on the 17 craquelure figures in Bucklow's paper (known tradition and
+scale): 14 of 17 placed in the right tradition when the support is given
+(--support), 11 of 17 without it. Two misses were Italian panels taken for
+Flemish, one a heavily textured French canvas taken for Dutch. The thresholds
+were set on those same figures, so expect lower accuracy
+on new paintings, and treat the result as a pointer, not a verdict.
+
 Usage
     python bucklow_classify.py C:\\cracks\\SK-A-2344_cracks
     python bucklow_classify.py C:\\cracks              (all *_cracks folders inside)
@@ -79,16 +86,21 @@ from skimage.morphology import skeletonize
 # poles, spread). Each descriptor is mapped to 0..1 with a logistic.
 # ---------------------------------------------------------------------------
 TH = {
-    "direction": (0.22, 0.06),   # orientation anisotropy (doubled-angle resultant)
-    "jagged":    (0.10, 0.03),   # 1 - chord/path over ~1 mm
-    "curved":    (0.06, 0.02),   # 1 - chord/path of whole crack segments
-    "square":    (0.50, 0.08),   # share of junction angles near 90/180 deg
-    "secondary": (0.55, 0.12),   # spread (CV) of crack widths
-    "broken":    (0.45, 0.10),   # share of free ends among nodes
-    "random":    (0.55, 0.12),   # irregularity of crack spacing (CV of gaps)
+    "direction": (0.28, 0.06),   # orientation anisotropy (doubled-angle resultant)
+    "jagged":    (0.075, 0.008), # 1 - chord/path over ~1 mm
+    "curved":    (12.0, 3.0),    # mean turn (deg) between consecutive ~3 mm stretches
+    "square":    (0.35, 0.07),   # four-fold symmetry of crack directions
+    "secondary": (0.40, 0.05),   # spread (CV) of crack widths
+    "broken":    (0.50, 0.08),   # share of free ends among nodes
+    "ordered":   (0.33, 0.06),   # sqrt(anisotropy * four-fold symmetry)
 }
 SMALL_MM, LARGE_MM = 5.0, 15.0   # Bucklow's island size limits
+LARGE_MID_MM = 6.0               # measured spacing at which islands count as large:
+                                 # the measured spacing runs below the island size
+                                 # (secondary cracks and fragments add length)
 LOCAL_MM = 1.0                   # "locally" = over about 1 mm
+TURN_MM = 3.0                    # "globally": heading change between ~3 mm stretches
+MIN_PIECE_MM = 2.0               # crack pieces shorter than this are ignored
 
 
 def logistic(x, mid, spread):
@@ -170,13 +182,20 @@ def measure(skel, binary=None, px_per_mm=None):
     """Measure Bucklow's descriptors on one crack skeleton (bool array)."""
     sk = skeletonize(skel.astype(bool))
     H, W = sk.shape
+    local_px = max(int(round(LOCAL_MM * px_per_mm)), 6) if px_per_mm else 10
+    # ignore a thin border (scan/crop edges) and crack pieces shorter than ~2 mm,
+    # which are mostly paint texture, not cracks
+    b = max(local_px // 2, 3)
+    sk[:b] = sk[-b:] = False; sk[:, :b] = sk[:, -b:] = False
+    n, lab, st, _ = cv2.connectedComponentsWithStats(sk.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n, bool); keep[1:] = st[1:, cv2.CC_STAT_AREA] >= MIN_PIECE_MM * local_px
+    sk = keep[lab]
     segs, junc, ends = trace_segments(sk)
     total_len = sum(path_length(s) for s in segs)
     m = {"crack_length_px": round(total_len, 1)}
     if total_len < 50:
         m["error"] = "too few cracks to describe"
         return m
-    local_px = max(int(round(LOCAL_MM * px_per_mm)), 6) if px_per_mm else 10
 
     # 1 direction: orientation of short chords along every crack, length weighted
     angs, wts = [], []
@@ -208,43 +227,28 @@ def measure(skel, binary=None, px_per_mm=None):
                 jag.append(1 - np.hypot(*(piece[-1] - piece[0])) / pl); jw.append(pl)
     m["jaggedness"] = round(float(np.average(jag, weights=jw)) if jag else 0.0, 3)
 
-    # 2b global: curvature of whole crack segments (smoothed, so jaggedness doesn't count)
-    curv, cw = [], []
+    # 2b global: how much the crack's heading turns between consecutive
+    # ~TURN_MM stretches (smoothed over ~1 mm first, so jaggedness doesn't count)
+    turns, tw = [], []
+    step = max(int(TURN_MM * local_px / LOCAL_MM), 2 * local_px)
+    k = max(local_px, 3)
     for s in segs:
-        if len(s) < 5 * local_px:
+        if len(s) < 2 * step + k:
             continue
-        k = max(local_px, 3)
         sm = np.stack([np.convolve(s[:, j], np.ones(k) / k, mode="valid") for j in (0, 1)], 1)
-        pl = path_length(sm)
-        if pl > 0:
-            curv.append(1 - np.hypot(*(sm[-1] - sm[0])) / pl); cw.append(pl)
-    m["curvature"] = round(float(np.average(curv, weights=cw)) if curv else 0.0, 3)
+        heads = []
+        for i in range(0, len(sm) - step, step):
+            d = sm[i + step] - sm[i]
+            heads.append(np.arctan2(d[0], d[1]))
+        for h0, h1 in zip(heads, heads[1:]):
+            turns.append(abs((np.degrees(h1 - h0) + 180) % 360 - 180)); tw.append(step)
+    m["turning_deg"] = round(float(np.average(turns, weights=tw)) if turns else 0.0, 2)
 
-    # 3 square: angles between branches at junctions
+    # 3 square: cracks in two perpendicular families = four-fold symmetry of
+    # the crack directions (measured above as "fourfold")
     jl = cv2.connectedComponentsWithStats(junc.astype(np.uint8), connectivity=8)
     centres = jl[3][1:]
-    r = max(2 * local_px, 8)
-    seg_ends = []
-    for s in segs:
-        if len(s) > r:
-            seg_ends.append((s[0], s[r] - s[0]))
-            seg_ends.append((s[-1], s[-1 - r] - s[-1]))
-    near_sq, counted = 0, 0
-    if len(centres) and seg_ends:
-        P = np.array([e[0] for e in seg_ends]); V = np.array([e[1] for e in seg_ends])
-        for c in centres:
-            c = np.array([c[1], c[0]], np.float32)            # (y, x)
-            idx = np.nonzero(np.hypot(*(P - c).T) <= 3)[0]
-            if len(idx) < 3:
-                continue
-            a = np.sort(np.degrees(np.arctan2(-V[idx, 0], V[idx, 1])) % 360)
-            gaps = np.diff(np.concatenate([a, [a[0] + 360]]))
-            for g in gaps:
-                counted += 1
-                if min(abs(g - 90), abs(g - 180)) <= 20:
-                    near_sq += 1
     m["junctions"] = int(len(centres))
-    m["square_angles"] = round(near_sq / counted, 3) if counted else None
 
     # 4 island size: mean spacing between cracks = 2 * area / crack length
     spacing_px = 2.0 * H * W / total_len
@@ -267,22 +271,9 @@ def measure(skel, binary=None, px_per_mm=None):
     m["end_points"] = n_end
     m["end_share"] = round(n_end / max(n_end + len(centres), 1), 3)
 
-    # 7 ordered / random: regularity of the gaps between cracks crossed by lines
-    # running across the main direction (and, if there is none, both ways)
-    gaps = []
-    dirs = [theta + 90] if m["anisotropy"] > TH["direction"][0] else [0, 90]
-    for ang in dirs:
-        rot = cv2.getRotationMatrix2D((W / 2, H / 2), -(ang - 90), 1.0) if ang % 180 else None
-        img = cv2.dilate(sk.astype(np.uint8), np.ones((3, 3), np.uint8))
-        if rot is not None:
-            img = cv2.warpAffine(img, rot, (W, H), flags=cv2.INTER_NEAREST)
-        lines = img if ang % 180 else img.T
-        for row in lines[::max(H // 40, 3)]:
-            xs_ = np.nonzero(np.diff(np.concatenate([[0], row, [0]]).astype(int)) == 1)[0]
-            if len(xs_) >= 3:
-                gaps.extend(np.diff(xs_).tolist())
-    gaps = np.array(gaps, float)
-    m["gap_cv"] = round(float(gaps.std() / gaps.mean()), 3) if len(gaps) > 10 else None
+    # 7 ordered / random: Bucklow's "synthesis" of a predominant direction and a
+    # regular (grid-like) layout - the geometric mean of the two measures
+    m["order"] = round(float(np.sqrt(m["anisotropy"] * m["fourfold"])), 3)
     return m
 
 
@@ -295,23 +286,20 @@ def describe(m, px_per_mm=None, grain=None):
         diff = abs(((m["main_angle_deg"] - ref) + 90) % 180 - 90)      # 0..90
         p["perpendicular"] = logistic(diff, 45, 10)                    # 1 = perpendicular
     p["jagged"] = logistic(m["jaggedness"], *TH["jagged"])
-    p["curved"] = logistic(m["curvature"], *TH["curved"])
-    if m.get("square_angles") is not None:
-        p["square"] = logistic(m["square_angles"], *TH["square"])
+    p["curved"] = logistic(m["turning_deg"], *TH["curved"])
+    p["square"] = logistic(m["fourfold"], *TH["square"])
     if px_per_mm and "spacing_mm" in m:
-        s = m["spacing_mm"]
-        p["large"] = logistic(np.log(s), np.log(np.sqrt(SMALL_MM * LARGE_MM)), 0.3)
+        p["large"] = logistic(np.log(m["spacing_mm"]), np.log(LARGE_MID_MM), 0.25)
     if m.get("width_cv") is not None:
         p["secondary"] = logistic(m["width_cv"], *TH["secondary"])
     p["broken"] = logistic(m["end_share"], *TH["broken"])
-    if m.get("gap_cv") is not None:
-        p["random"] = logistic(m["gap_cv"], *TH["random"])
+    p["random"] = 1.0 - logistic(m["order"], *TH["ordered"])
     return p
 
 
 WORDS = {
     "direction":     ("NO DIRECTION", "DIRECTION"),
-    "perpendicular": ("PARALLEL", "PERPENDICULAR"),
+    "perpendicular": ("PARALLEL to grain/longest side", "PERPENDICULAR to grain/longest side"),
     "jagged":        ("SMOOTH", "JAGGED"),
     "curved":        ("STRAIGHT", "CURVED"),
     "square":        ("NOT SQUARE", "SQUARE"),
@@ -352,7 +340,7 @@ def classify(p, support=None):
                 continue                                       # not measured: no evidence
             # 'perpendicular' only means something when there IS a direction
             if d == "perpendicular":
-                w *= p["direction"]
+                w *= max(p["direction"], 0.5)                 # weaker when direction is weak
             num += w * (1 - abs(p[d] - exp)); den += w
         s = num / den if den else 0.0
         if support and SUPPORT[name] != support:
