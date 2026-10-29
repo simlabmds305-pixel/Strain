@@ -189,7 +189,21 @@ class App:
 
         if self.folder.get() and os.path.isdir(self.folder.get()):
             self.load_folder()
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
+
+    def on_close(self):
+        """Closing while a run or a master refresh is going cuts it off halfway
+        (a refresh closed this way once left findings.txt from the run before)."""
+        if self.busy or getattr(self, "master_busy", False):
+            from tkinter import messagebox
+            what = "a run" if self.busy else "the master analysis refresh"
+            if not messagebox.askyesno("Still working",
+                                       f"{what[0].upper() + what[1:]} is still going. Closing "
+                                       f"now stops it halfway and leaves its files incomplete."
+                                       "\n\nClose anyway?", parent=self.root):
+                return
+        self.root.destroy()
 
     # ------------------------------------------------------------ folder
     def browse(self):
