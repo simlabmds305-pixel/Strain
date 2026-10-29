@@ -3,6 +3,8 @@ Craquelure app - one window for the whole job, no commands to type.
 
   1. Open paintings (or a folder of them).
   2. Drag boxes on the painting round cracked paint. Click a box to select it.
+     Zoom in with the mouse wheel (or + / -), move around with a right-drag,
+     "Fit" shows the whole painting again.
   3. For the selected box you see the enhanced, binary and skeleton pictures
      and Bucklow's classification (scores per tradition + descriptor words).
   4. Fill in the painting's width, the grain / longest-side direction and the
@@ -78,6 +80,7 @@ def run():
     data = {}               # path -> {"boxes": [[x,y,w,h], ...], "width_cm": "", "grain": ..., "support": ...}
     cache = {}              # (path, box index) -> analyse_box result
     S = dict(cur=None, img=None, sel=None, scale=1.0, off=(0, 0), drag=None, photo=None,
+             zoom=None, centre=(0, 0), pan=None,
              tabs={}, job=None, session_dir=None)
 
     # ------------------------------------------------------------------ layout
@@ -129,9 +132,16 @@ def run():
                  command=lambda _v: settings_changed()).grid(row=r, column=1, sticky="w")
 
     # centre: the painting
-    hint = ttk.Label(centre, text="Drag a box round cracked paint. Click a box to select it.",
-                     anchor="w")
-    hint.pack(fill="x")
+    ttk.Label(centre, text="Drag a box round cracked paint. Click a box to select it.",
+              anchor="w").pack(fill="x")
+    zbar = ttk.Frame(centre); zbar.pack(fill="x", pady=(2, 2))
+    ttk.Label(zbar, text="Zoom: mouse wheel   Move: right-drag",
+              anchor="w", foreground="#52514e").pack(side="left")
+    ttk.Button(zbar, text="Fit", width=5, command=lambda: zoom_fit()).pack(side="right")
+    ttk.Button(zbar, text="1:1", width=5, command=lambda: zoom_to(1.0)).pack(side="right")
+    ttk.Button(zbar, text="-", width=3, command=lambda: zoom_by(1 / 1.5)).pack(side="right")
+    zoom_lbl = ttk.Label(zbar, text="", width=7, anchor="center"); zoom_lbl.pack(side="right")
+    ttk.Button(zbar, text="+", width=3, command=lambda: zoom_by(1.5)).pack(side="right")
     canvas = tk.Canvas(centre, bg="#2b2b2b", highlightthickness=0, cursor="crosshair")
     canvas.pack(fill="both", expand=True)
     cb = ttk.Frame(centre); cb.pack(fill="x", pady=(4, 0))
@@ -235,6 +245,7 @@ def run():
         if img is None:
             status.config(text=f"could not read {p}"); return
         S["cur"], S["img"], S["sel"] = p, img, (0 if data[p]["boxes"] else None)
+        S["zoom"], S["centre"] = None, (img.shape[1] / 2, img.shape[0] / 2)     # start fitted
         d = data[p]
         loading[0] = True
         v_width.set(d["width_cm"]); v_grain.set(d["grain"]); v_support.set(d["support"])
@@ -276,28 +287,96 @@ def run():
                     sensitivity=v_sens.get(), cleanup=v_clean.get(), spurs=v_spurs.get())
 
     # ------------------------------------------------------------ drawing
+    def fit_scale():
+        cw, ch = max(canvas.winfo_width(), 50), max(canvas.winfo_height(), 50)
+        H, W = S["img"].shape[:2]
+        return min(cw / W, ch / H)
+
+    def view_scale():
+        """Screen pixels per painting pixel (S['zoom'] None = fit the whole painting)."""
+        return S["zoom"] if S["zoom"] else fit_scale()
+
+    def clamp_centre():
+        H, W = S["img"].shape[:2]
+        sc = view_scale()
+        cw, ch = max(canvas.winfo_width(), 50), max(canvas.winfo_height(), 50)
+        cx, cy = S["centre"]
+        hw, hh = cw / 2 / sc, ch / 2 / sc                # half the view, in painting pixels
+        cx = W / 2 if hw * 2 >= W else min(max(cx, hw), W - hw)
+        cy = H / 2 if hh * 2 >= H else min(max(cy, hh), H - hh)
+        S["centre"] = (cx, cy)
+
     def draw_painting():
         canvas.delete("all")
         img = S["img"]
         if img is None:
             return
         cw, ch = max(canvas.winfo_width(), 50), max(canvas.winfo_height(), 50)
-        sc = min(cw / img.shape[1], ch / img.shape[0])
-        size = (max(int(img.shape[1] * sc), 1), max(int(img.shape[0] * sc), 1))
-        disp = cv2.cvtColor(cv2.resize(img, size, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        clamp_centre()
+        sc = view_scale()
+        H, W = img.shape[:2]
+        cx, cy = S["centre"]
+        # only the visible part of the painting is resized - fast even for huge scans
+        ix0, iy0 = max(int(cx - cw / 2 / sc), 0), max(int(cy - ch / 2 / sc), 0)
+        ix1, iy1 = min(int(np.ceil(cx + cw / 2 / sc)) + 1, W), min(int(np.ceil(cy + ch / 2 / sc)) + 1, H)
+        part = img[iy0:iy1, ix0:ix1]
+        size = (max(int(round((ix1 - ix0) * sc)), 1), max(int(round((iy1 - iy0) * sc)), 1))
+        interp = cv2.INTER_AREA if sc < 1 else (cv2.INTER_LINEAR if sc < 4 else cv2.INTER_NEAREST)
+        disp = cv2.cvtColor(cv2.resize(part, size, interpolation=interp), cv2.COLOR_BGR2RGB)
         S["photo"] = ImageTk.PhotoImage(Image.fromarray(disp))
-        ox, oy = (cw - size[0]) // 2, (ch - size[1]) // 2
+        ox, oy = cw / 2 - cx * sc, ch / 2 - cy * sc       # screen position of painting pixel (0,0)
         S["scale"], S["off"] = sc, (ox, oy)
-        canvas.create_image(ox, oy, image=S["photo"], anchor="nw")
+        canvas.create_image(ox + ix0 * sc, oy + iy0 * sc, image=S["photo"], anchor="nw")
         for i, (x, y, w, h) in enumerate(data[S["cur"]]["boxes"]):
             col = SEL_COLOUR if i == S["sel"] else BOX_COLOUR
             x0, y0 = ox + x * sc, oy + y * sc
             canvas.create_rectangle(x0, y0, x0 + w * sc, y0 + h * sc, outline=col, width=3 if i == S["sel"] else 2)
             canvas.create_text(x0 + 6, y0 + 4, text=str(i + 1), anchor="nw", fill=col,
                                font=("Segoe UI", 12, "bold"))
+        zoom_lbl.config(text=f"{sc * 100:.0f}%")
         n = len(data[S["cur"]]["boxes"])
         box_lbl.config(text=(f"box {S['sel'] + 1} of {n} selected" if S["sel"] is not None else
                              "no box - drag one on the painting"))
+
+    def zoom_to(new, ex=None, ey=None):
+        """Zoom to 'new' screen px per painting px, keeping the point under (ex, ey) still."""
+        if S["img"] is None:
+            return
+        new = min(max(new, fit_scale() * 0.5), 16.0)
+        cw, ch = max(canvas.winfo_width(), 50), max(canvas.winfo_height(), 50)
+        ex = cw / 2 if ex is None else ex
+        ey = ch / 2 if ey is None else ey
+        sc = view_scale()
+        cx, cy = S["centre"]
+        px, py = cx + (ex - cw / 2) / sc, cy + (ey - ch / 2) / sc     # painting point under cursor
+        S["zoom"] = new
+        S["centre"] = (px - (ex - cw / 2) / new, py - (ey - ch / 2) / new)
+        draw_painting()
+
+    def zoom_by(f, ex=None, ey=None):
+        if S["img"] is not None:
+            zoom_to(view_scale() * f, ex, ey)
+
+    def zoom_fit():
+        if S["img"] is not None:
+            S["zoom"] = None; draw_painting()
+
+    def on_wheel(e):
+        up = (getattr(e, "delta", 0) > 0) or getattr(e, "num", 0) == 4
+        zoom_by(1.25 if up else 1 / 1.25, e.x, e.y)
+
+    def pan_start(e):
+        S["pan"] = (e.x, e.y, S["centre"]); canvas.config(cursor="fleur")
+
+    def pan_move(e):
+        if S.get("pan"):
+            x0, y0, (cx, cy) = S["pan"]
+            sc = view_scale()
+            S["centre"] = (cx - (e.x - x0) / sc, cy - (e.y - y0) / sc)
+            draw_painting()
+
+    def pan_end(_e):
+        S["pan"] = None; canvas.config(cursor="crosshair")
 
     def to_img(ex, ey):
         sc, (ox, oy) = S["scale"], S["off"]
@@ -350,6 +429,14 @@ def run():
     canvas.bind("<B1-Motion>", on_move)
     canvas.bind("<ButtonRelease-1>", on_release)
     canvas.bind("<Configure>", lambda e: draw_painting())
+    canvas.bind("<MouseWheel>", on_wheel)                    # Windows / Mac
+    canvas.bind("<Button-4>", on_wheel); canvas.bind("<Button-5>", on_wheel)   # Linux
+    for btn in ("3", "2"):                                    # right or middle button drags the view
+        canvas.bind(f"<ButtonPress-{btn}>", pan_start)
+        canvas.bind(f"<B{btn}-Motion>", pan_move)
+        canvas.bind(f"<ButtonRelease-{btn}>", pan_end)
+    root.bind("<plus>", lambda e: zoom_by(1.5)); root.bind("<equal>", lambda e: zoom_by(1.5))
+    root.bind("<minus>", lambda e: zoom_by(1 / 1.5)); root.bind("<Key-0>", lambda e: zoom_fit())
     root.bind("<Delete>", lambda e: delete_box())
     root.bind("<Right>", lambda e: step(1))
     root.bind("<Left>", lambda e: step(-1))
