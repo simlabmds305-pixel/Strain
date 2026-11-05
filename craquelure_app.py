@@ -13,8 +13,9 @@ Craquelure app - one window for the whole job, no commands to type.
      summary (average score per tradition, how many boxes agree, which descriptors
      match, and whether the boxes are consistent). It can be saved.
   6. "Save all" writes every box's pictures to <painting>_cracks folders, one
-     results table (craquelure_results.csv) next to the paintings, and a box
-     comparison for every painting with 2+ boxes.
+     results table (craquelure_results.csv), the box comparison of every painting
+     (craquelure_comparison.csv + craquelure_summary.txt) and all of it in one
+     Excel file (craquelure_results.xlsx) next to the paintings.
 
 Boxes and settings are remembered (craquelure_session.json next to the
 paintings), so you can close the app and carry on later.
@@ -39,6 +40,9 @@ import bucklow_classify as bc            # noqa: E402
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
 SESSION = "craquelure_session.json"
 RESULTS = "craquelure_results.csv"
+COMPARISON = "craquelure_comparison.csv"
+SUMMARY = "craquelure_summary.txt"
+WORKBOOK = "craquelure_results.xlsx"
 TRAD_COLOURS = {"Italian": "#2a78d6", "Flemish": "#eb6834", "Dutch": "#1baf7a", "French": "#eda100"}
 BOX_COLOUR, SEL_COLOUR = "#ffd400", "#ff3030"
 
@@ -131,6 +135,7 @@ def compare_boxes(results):
         else:
             mixed.append(f"{w0} / {w1} ({len(vals) - n1} vs {n1})")
     lines.append("")
+    summ["agree"], summ["differ"] = same, mixed
     lines.append("Descriptors all boxes agree on:  " + (", ".join(same) if same else "none"))
     if mixed:
         lines.append("Descriptors that differ:         " + "; ".join(mixed))
@@ -168,6 +173,64 @@ def write_comparison(out_dir, stem, rows, text, painting_info):
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(f"Craquelure comparison - {stem}\n{painting_info}\n\n{text}\n")
     return csv_path, txt_path
+
+
+def comparison_row(painting, info, summ):
+    """One row of craquelure_comparison.csv: the summary of one painting's boxes."""
+    row = {"painting": painting, "boxes": summ.get("boxes", 0), "classified": summ.get("classified", 0)}
+    if summ.get("mean_scores"):
+        row["overall best match"] = summ["overall"]
+        row["boxes agreeing"] = f"{summ['votes'][summ['overall'].split()[0]]}/{summ['classified']}"
+        row["lead over 2nd"] = summ["margin"]
+        row["verdict"] = summ["verdict"].split(":")[0] if ":" in summ["verdict"][:20] else "ONE BOX"
+        for k in summ["mean_scores"]:
+            row[f"{k} mean"] = summ["mean_scores"][k]
+            row[f"{k} spread"] = summ["sd_scores"][k]
+            row[f"{k} votes"] = summ["votes"][k]
+        row["descriptors all boxes agree on"] = ", ".join(summ.get("agree", []))
+        row["descriptors that differ"] = "; ".join(summ.get("differ", []))
+        row["summary"] = summ["verdict"]
+    else:
+        row["verdict"] = "no box could be classified"
+    row.update(info)
+    return row
+
+
+def write_workbook(path, results_rows, comparison_rows, box_tables):
+    """Everything in one Excel file (needs openpyxl - skipped quietly if missing)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError:
+        return False
+    wb = Workbook()
+    used = set()
+
+    def sheet(title, rows):
+        name = "".join(ch if ch not in '[]:*?/\\' else "_" for ch in title)[:31] or "sheet"
+        base, k = name, 1
+        while name in used:
+            name = f"{base[:28]}_{k}"; k += 1
+        used.add(name)
+        ws = wb.create_sheet(name)
+        keys = list(dict.fromkeys(k for r in rows for k in r))
+        ws.append(keys)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for r in rows:
+            ws.append([r.get(k, "") for k in keys])
+        for col in ws.columns:
+            w = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max(w + 2, 8), 60)
+        ws.freeze_panes = "B2"
+
+    wb.remove(wb.active)
+    sheet("Comparison", comparison_rows)
+    sheet("Results", results_rows)
+    for name, rows in box_tables:
+        sheet(name, rows)
+    wb.save(path)
+    return True
 
 
 def run():
@@ -729,30 +792,47 @@ def run():
                 rows.append({"painting": os.path.basename(p), "box": i + 1, "error": str(ex)})
                 traceback.print_exc()
             prog["value"] = k
-        compared = 0
-        for p in paintings:                              # a comparison for every painting with 2+ boxes
-            if len(data[p]["boxes"]) >= 2:
-                try:
-                    img = S["img"] if p == S["cur"] else ce.imread(p)
-                    crows, _s, text = comparison_for(p, img)
-                    write_comparison(os.path.splitext(p)[0] + "_cracks",
-                                     os.path.splitext(os.path.basename(p))[0], crows, text, painting_info(p))
-                    compared += 1
-                except Exception:
-                    traceback.print_exc()
-        out = os.path.join(S["session_dir"], RESULTS)
+        comp_rows, box_tables, texts = [], [], []
+        for p in paintings:                              # compare the boxes of every painting
+            if not data[p]["boxes"]:
+                continue
+            name = os.path.basename(p)
+            stem = os.path.splitext(name)[0]
+            try:
+                img = S["img"] if p == S["cur"] else ce.imread(p)
+                crows, summ, text = comparison_for(p, img)
+                info = dict(width_cm=data[p]["width_cm"], grain=data[p]["grain"], support=data[p]["support"])
+                comp_rows.append(comparison_row(name, info, summ))
+                box_tables.append((stem, crows))
+                texts.append(f"===== {name}\n{painting_info(p)}\n\n{text}\n")
+                if len(data[p]["boxes"]) >= 2:
+                    write_comparison(os.path.splitext(p)[0] + "_cracks", stem, crows, text, painting_info(p))
+            except Exception as ex:
+                comp_rows.append({"painting": name, "verdict": f"error: {ex}"})
+                traceback.print_exc()
+        d = S["session_dir"]
+        out = os.path.join(d, RESULTS)
+        written = []
         try:
-            bc.write_csv(out, rows)
-        except PermissionError:
-            messagebox.showerror("Could not save", f"{out} is open in another program (Excel?). "
-                                                   "Close it and press Save all again."); return
+            bc.write_csv(out, rows); written.append(RESULTS)
+            if comp_rows:
+                bc.write_csv(os.path.join(d, COMPARISON), comp_rows); written.append(COMPARISON)
+                with open(os.path.join(d, SUMMARY), "w", encoding="utf-8") as fh:
+                    fh.write("Craquelure - comparison of the boxes in each painting\n"
+                             "(a pointer after Bucklow 1997, not a verdict on attribution)\n\n"
+                             + "\n".join(texts))
+                written.append(SUMMARY)
+            if write_workbook(os.path.join(d, WORKBOOK), rows, comp_rows, box_tables):
+                written.append(WORKBOOK)
+        except PermissionError as ex:
+            messagebox.showerror("Could not save", f"{ex.filename or out} is open in another program "
+                                                   "(Excel?). Close it and press Save all again."); return
         save_session()
-        status.config(text=f"saved {len(rows)} box(es): pictures in each painting's _cracks folder, "
-                           f"table in {out}")
-        messagebox.showinfo("Saved", f"Saved {len(rows)} box(es).\n\nPictures: <painting>_cracks folders\n"
-                                     f"Table: {out}\n"
-                                     f"Box comparisons: {compared} painting(s) with 2+ boxes "
-                                     f"(<painting>_comparison.csv / .txt in the _cracks folder)")
+        status.config(text=f"saved {len(rows)} box(es) of {len(comp_rows)} painting(s) - "
+                           f"{', '.join(written)} in {d}")
+        messagebox.showinfo("Saved", f"Saved {len(rows)} box(es) of {len(comp_rows)} painting(s).\n\n"
+                                     f"In {d}:\n  " + "\n  ".join(written) +
+                                     "\n\nPictures: each painting's _cracks folder")
 
     def open_results():
         d = S["session_dir"]

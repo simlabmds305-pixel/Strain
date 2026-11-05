@@ -18,11 +18,11 @@ if not defined PY (
 )
 
 rem first run: install anything missing (window-capable OpenCV, scikit-image, Pillow)
-"%PY%" -c "import cv2, skimage, PIL; cv2.namedWindow('t'); cv2.destroyWindow('t')" >nul 2>nul
+"%PY%" -c "import cv2, skimage, PIL, openpyxl; cv2.namedWindow('t'); cv2.destroyWindow('t')" >nul 2>nul
 if errorlevel 1 (
     echo Installing the packages the app needs - this happens only once...
     "%PY%" -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless >nul 2>nul
-    "%PY%" -m pip install opencv-python numpy scikit-image pillow
+    "%PY%" -m pip install opencv-python numpy scikit-image pillow openpyxl
 )
 
 set "PYW=%PY:python.exe=pythonw.exe%"
