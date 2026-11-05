@@ -9,8 +9,12 @@ Craquelure app - one window for the whole job, no commands to type.
      and Bucklow's classification (scores per tradition + descriptor words).
   4. Fill in the painting's width, the grain / longest-side direction and the
      support - the classification uses them.
-  5. "Save all" writes every box's pictures to <painting>_cracks folders and one
-     results table (craquelure_results.csv) next to the paintings.
+  5. "Compare boxes" shows all boxes of the painting side by side: a table and a
+     summary (average score per tradition, how many boxes agree, which descriptors
+     match, and whether the boxes are consistent). It can be saved.
+  6. "Save all" writes every box's pictures to <painting>_cracks folders, one
+     results table (craquelure_results.csv) next to the paintings, and a box
+     comparison for every painting with 2+ boxes.
 
 Boxes and settings are remembered (craquelure_session.json next to the
 paintings), so you can close the app and carry on later.
@@ -63,6 +67,109 @@ def analyse_box(img, roi, st):
     return r
 
 
+TRADS = list(bc.PROFILES)                # the four traditions, in a fixed order
+DESCS = list(bc.WORDS)                   # Bucklow's descriptors, in a fixed order
+
+
+def compare_boxes(results):
+    """Compare several boxes of one painting.
+
+    results: list of (box number, analyse_box result).
+    Returns (table rows, summary dict, summary text)."""
+    ok = [(n, r) for n, r in results if not r.get("error")]
+    rows = []
+    for n, r in results:
+        row = {"box": n, "size_px": f"{r['roi'][2]} x {r['roi'][3]}"}
+        if r.get("error"):
+            row["best match"] = "(no result: " + r["error"] + ")"
+            rows.append(row); continue
+        row["best match"] = r["best"].split()[0]
+        for t in TRADS:
+            row[t.split()[0]] = round(r["scores"][t], 2)
+        for d in DESCS:
+            if d in r["values"]:
+                row[d] = f"{r['words'][d]} ({r['values'][d]:.2f})"
+        sp = r["measures"].get("spacing_mm")
+        row["crack spacing mm"] = round(sp, 1) if sp else ""
+        rows.append(row)
+
+    summ = {"boxes": len(results), "classified": len(ok)}
+    lines = [f"{len(results)} box(es), {len(ok)} classified."]
+    if not ok:
+        lines.append("No box could be classified - draw bigger boxes or raise Sensitivity.")
+        return rows, summ, "\n".join(lines)
+
+    # scores per tradition across boxes
+    sc = np.array([[r["scores"][t] for t in TRADS] for _, r in ok])
+    mean, sd = sc.mean(0), sc.std(0)
+    order = np.argsort(-mean)
+    votes = {t.split()[0]: sum(r["best"] == t for _, r in ok) for t in TRADS}
+    top, second = TRADS[order[0]], TRADS[order[1]]
+    margin = mean[order[0]] - mean[order[1]]
+    agree = votes[top.split()[0]] / len(ok)
+    summ.update(mean_scores={t.split()[0]: round(float(mean[i]), 3) for i, t in enumerate(TRADS)},
+                sd_scores={t.split()[0]: round(float(sd[i]), 3) for i, t in enumerate(TRADS)},
+                votes=votes, overall=top, margin=round(float(margin), 3), agreement=round(agree, 2))
+
+    lines.append("")
+    lines.append("Average score per tradition (+/- spread between boxes), and how many boxes")
+    lines.append("picked it as their best match:")
+    for i in order:
+        t = TRADS[i]
+        lines.append(f"  {t:<30s} {mean[i]:.2f} +/- {sd[i]:.2f}    {votes[t.split()[0]]}/{len(ok)} boxes")
+
+    # descriptors: which ones all boxes agree on
+    same, mixed = [], []
+    for d in DESCS:
+        vals = [r["values"][d] for _, r in ok if d in r["values"]]
+        if not vals:
+            continue
+        w0, w1 = bc.WORDS[d]
+        n1 = sum(v >= 0.5 for v in vals)
+        if n1 in (0, len(vals)):
+            same.append(w1 if n1 else w0)
+        else:
+            mixed.append(f"{w0} / {w1} ({len(vals) - n1} vs {n1})")
+    lines.append("")
+    lines.append("Descriptors all boxes agree on:  " + (", ".join(same) if same else "none"))
+    if mixed:
+        lines.append("Descriptors that differ:         " + "; ".join(mixed))
+
+    # verdict
+    lines.append("")
+    if len(ok) == 1:
+        verdict = (f"Only one box - {top} ({mean[order[0]]:.2f}). "
+                   "Draw two or three more boxes in other places to check it.")
+    elif agree == 1 and margin >= 0.10:
+        verdict = (f"CONSISTENT: every box points to {top} "
+                   f"(average {mean[order[0]]:.2f}, {margin:.2f} ahead of {second}).")
+    elif agree >= 0.5 and margin >= 0.05:
+        verdict = (f"MOSTLY CONSISTENT: {votes[top.split()[0]]} of {len(ok)} boxes point to {top} "
+                   f"(average {mean[order[0]]:.2f}, {margin:.2f} ahead of {second}). "
+                   "Look at the boxes that disagree - damage, retouching or a different paint "
+                   "passage can change the pattern locally.")
+    else:
+        verdict = (f"NOT CONSISTENT: the boxes disagree ({', '.join(f'{k} {v}' for k, v in votes.items() if v)}); "
+                   f"{top} and {second} are close ({mean[order[0]]:.2f} vs {mean[order[1]]:.2f}). "
+                   "Treat the result as uncertain; try boxes on flatter, more evenly cracked paint.")
+    summ["verdict"] = verdict
+    lines.append("Overall: " + verdict)
+    lines.append("")
+    lines.append("A pointer after Bucklow (1997), not a verdict on attribution.")
+    return rows, summ, "\n".join(lines)
+
+
+def write_comparison(out_dir, stem, rows, text, painting_info):
+    """<stem>_comparison.csv (table) and <stem>_comparison.txt (summary)."""
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, f"{stem}_comparison.csv")
+    bc.write_csv(csv_path, rows)
+    txt_path = os.path.join(out_dir, f"{stem}_comparison.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"Craquelure comparison - {stem}\n{painting_info}\n\n{text}\n")
+    return csv_path, txt_path
+
+
 def run():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -94,7 +201,8 @@ def run():
     name_lbl.pack(side="left", padx=6)
     ttk.Button(top, text="Next >", width=8, command=lambda: step(1)).pack(side="left")
     ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
-    ttk.Button(top, text="Save all", command=lambda: save_all()).pack(side="left")
+    ttk.Button(top, text="Compare boxes", command=lambda: compare_window()).pack(side="left")
+    ttk.Button(top, text="Save all", command=lambda: save_all()).pack(side="left", padx=4)
     ttk.Button(top, text="Open results folder", command=lambda: open_results()).pack(side="left", padx=4)
     prog = ttk.Progressbar(top, length=180, mode="determinate"); prog.pack(side="left", padx=8)
 
@@ -526,6 +634,71 @@ def run():
             words.insert("end", "\nNote: " + n)
         words.insert("end", "\n\nA pointer after Bucklow (1997), not a verdict.")
 
+    # ------------------------------------------------------------ comparing
+    def painting_info(p):
+        d = data[p]
+        width = f"{d['width_cm']} cm" if str(d["width_cm"]).strip() else "not given"
+        return (f"painting width: {width},  grain/longest side: {d['grain']},  "
+                f"support: {d['support']}")
+
+    def comparison_for(p, img=None):
+        img = img if img is not None else (S["img"] if p == S["cur"] else ce.imread(p))
+        res = [(i + 1, result_for(p, i, img)) for i in range(len(data[p]["boxes"]))]
+        return compare_boxes(res)
+
+    def compare_window():
+        p = S["cur"]
+        if p is None or not data[p]["boxes"]:
+            messagebox.showinfo("No boxes", "Draw at least two boxes on this painting to compare them.")
+            return
+        status.config(text="comparing the boxes ..."); root.update()
+        rows, summ, text = comparison_for(p)
+        stem = os.path.splitext(os.path.basename(p))[0]
+
+        win = tk.Toplevel(root); win.title(f"Compare boxes - {stem}"); win.geometry("1250x650")
+        ttk.Label(win, text=f"{stem}   ({painting_info(p)})", padding=6,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tf = ttk.Frame(win, padding=(6, 0)); tf.pack(fill="both", expand=True)
+        cols = list(dict.fromkeys(k for r in rows for k in r))
+        tv = ttk.Treeview(tf, columns=cols, show="headings", height=min(max(len(rows), 3), 12))
+        for c in cols:
+            wide = 150 if c in DESCS or c == "best match" else 80
+            tv.heading(c, text=c); tv.column(c, width=wide, anchor="center", stretch=False)
+        for r in rows:
+            tv.insert("", "end", values=[r.get(c, "") for c in cols])
+        xs = ttk.Scrollbar(tf, orient="horizontal", command=tv.xview); tv.configure(xscrollcommand=xs.set)
+        tv.pack(fill="both", expand=True); xs.pack(fill="x")
+
+        sf = ttk.LabelFrame(win, text="Summary", padding=6); sf.pack(fill="both", expand=True, padx=6, pady=6)
+        if summ.get("mean_scores"):
+            bars = tk.Canvas(sf, width=330, height=150, bg="white", highlightthickness=0)
+            bars.pack(side="left", fill="y", padx=(0, 8))
+            for i, t in enumerate(sorted(TRADS, key=lambda t: -summ["mean_scores"][t.split()[0]])):
+                k = t.split()[0]; m, sd_ = summ["mean_scores"][k], summ["sd_scores"][k]
+                y = 8 + i * 35
+                bars.create_text(6, y, text=f"{t}   {summ['votes'][k]}/{summ['classified']} boxes",
+                                 anchor="nw", fill="#0b0b0b", font=("Segoe UI", 9, "bold" if i == 0 else "normal"))
+                x0, L = 6, 260
+                bars.create_rectangle(x0, y + 16, x0 + max(L * m, 2), y + 28, fill=TRAD_COLOURS[k], outline="")
+                bars.create_line(x0 + L * max(m - sd_, 0), y + 22, x0 + L * min(m + sd_, 1), y + 22,
+                                 fill="#0b0b0b", width=2)                 # spread between boxes
+                bars.create_text(x0 + L + 8, y + 22, text=f"{m:.2f}", anchor="w", fill="#52514e",
+                                 font=("Segoe UI", 9))
+        txt = tk.Text(sf, wrap="word", font=("Consolas", 10), height=12); txt.pack(fill="both", expand=True)
+        txt.insert("end", text); txt.config(state="disabled")
+
+        def save():
+            try:
+                c, t = write_comparison(os.path.splitext(p)[0] + "_cracks", stem, rows, text, painting_info(p))
+            except PermissionError:
+                messagebox.showerror("Could not save", "The comparison file is open in another program "
+                                                       "(Excel?). Close it and try again.", parent=win); return
+            messagebox.showinfo("Saved", f"Table:   {c}\nSummary: {t}", parent=win)
+        bb = ttk.Frame(win, padding=6); bb.pack(fill="x")
+        ttk.Button(bb, text="Save table + summary", command=save).pack(side="left")
+        ttk.Button(bb, text="Close", command=win.destroy).pack(side="right")
+        status.config(text=f"{stem}: " + summ.get("verdict", text.splitlines()[-1])[:150])
+
     # ------------------------------------------------------------- saving
     def save_all():
         jobs = [(p, i) for p in paintings for i in range(len(data[p]["boxes"]))]
@@ -556,6 +729,17 @@ def run():
                 rows.append({"painting": os.path.basename(p), "box": i + 1, "error": str(ex)})
                 traceback.print_exc()
             prog["value"] = k
+        compared = 0
+        for p in paintings:                              # a comparison for every painting with 2+ boxes
+            if len(data[p]["boxes"]) >= 2:
+                try:
+                    img = S["img"] if p == S["cur"] else ce.imread(p)
+                    crows, _s, text = comparison_for(p, img)
+                    write_comparison(os.path.splitext(p)[0] + "_cracks",
+                                     os.path.splitext(os.path.basename(p))[0], crows, text, painting_info(p))
+                    compared += 1
+                except Exception:
+                    traceback.print_exc()
         out = os.path.join(S["session_dir"], RESULTS)
         try:
             bc.write_csv(out, rows)
@@ -566,7 +750,9 @@ def run():
         status.config(text=f"saved {len(rows)} box(es): pictures in each painting's _cracks folder, "
                            f"table in {out}")
         messagebox.showinfo("Saved", f"Saved {len(rows)} box(es).\n\nPictures: <painting>_cracks folders\n"
-                                     f"Table: {out}")
+                                     f"Table: {out}\n"
+                                     f"Box comparisons: {compared} painting(s) with 2+ boxes "
+                                     f"(<painting>_comparison.csv / .txt in the _cracks folder)")
 
     def open_results():
         d = S["session_dir"]
