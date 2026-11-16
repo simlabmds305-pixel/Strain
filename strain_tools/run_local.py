@@ -1118,11 +1118,91 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
     return res
 
 
+# ---------------------------------------------------- before + after photos
+def analyse_before_after(folder, cfg, roi_before, roi_after, out_name="analysis",
+                         skip=(), quiet=True, progress=None):
+    """A set of just two photos -- before and after, no time-lapse (the humidity
+    sets).  Each photo gets its own crop, since the bead need not sit in the
+    same place in both, and each is measured to its own mat edge.  Writes
+    <out>/ (summary.txt, per_image.csv, pair.png, settings.json, results.txt)."""
+    skip = {os.path.basename(x) for x in skip}
+    paths = [p for p in bp.list_frames(folder) if os.path.basename(p) not in skip]
+    if len(paths) != 2:
+        raise SystemExit(f"{folder}: before + after needs exactly 2 images, found {len(paths)}")
+    before, after = paths
+    nb, na = os.path.basename(before), os.path.basename(after)
+    per = {}
+    if roi_before:
+        per[nb] = tuple(int(v) for v in roi_before)
+    if roi_after:
+        per[na] = tuple(int(v) for v in roi_after)
+    cfg2 = dict(cfg, ROI=tuple(roi_before) if roi_before else None, ROI_PER_IMAGE=per)
+    outdir = os.path.join(folder, out_name or "analysis")
+    why = ("  BEFORE + AFTER photos only (no time-lapse). Each photo has its own crop and\n"
+           "  is measured to its own mat edge.\n")
+    if progress:
+        progress(0, 2)
+    df, info = run_pair((before, after), cfg2, outdir, quiet=True, why=why)
+    if progress:
+        progress(2, 2)
+    scale = cfg["SCALE_PX_PER_UM"]
+
+    def end(col):
+        return float(df[col].iloc[-1]) if col in df.columns else np.nan
+
+    res = dict(mode="before_after", folder=folder, outdir=outdir, pairdir=outdir,
+               before=nb, after=na, crop_before=per.get(nb), crop_after=per.get(na),
+               strain=float(df["vol_strain_pct"].iloc[-1]),
+               v0_mm3=float(df["V_consensus_mm3"].iloc[0]),
+               v1_mm3=float(df["V_consensus_mm3"].iloc[-1]),
+               ok=bool(df["use"].all()),
+               methods=method_table(df, info, scale),
+               vertical=end("height_strain_pct"), radial=end("radial_strain_pct"),
+               linear=end("linear_strain_pct"),
+               mat_rows=[float(v) for v in df["baseline_y"]] if "baseline_y" in df.columns
+               else None,
+               thresh_offset=cfg.get("THRESH_OFFSET", 0))
+    with open(os.path.join(outdir, "results.txt"), "w") as f:
+        f.write(results_text(res))
+    if not quiet:
+        print(results_text(res))
+    return res
+
+
+def before_after_text(res):
+    L = ["=" * 72, f" RESULTS  {os.path.basename(res['folder'])}   (before + after photos)",
+         "=" * 72, "",
+         f"  {res['before']} -> {res['after']}",
+         f"  crop                before {_crop_txt(res['crop_before'])}",
+         f"                      after  {_crop_txt(res['crop_after'])}",
+         f"  threshold offset    {res.get('thresh_offset', 0)}",
+         "",
+         f"  VOLUMETRIC STRAIN   {res['strain']:+.2f} %",
+         f"  volume              {res['v0_mm3']:.3f} -> {res['v1_mm3']:.3f} mm^3",
+         "  by method:",
+         *method_lines(res.get("methods", {}), "    ")]
+    if np.isfinite(res.get("vertical", np.nan)):
+        L.append(f"  vertical (height)   {res['vertical']:+.2f} %")
+    if np.isfinite(res.get("radial", np.nan)):
+        L.append(f"  radial              {res['radial']:+.2f} %")
+    if np.isfinite(res.get("linear", np.nan)):
+        L.append(f"  linear (cube root)  {res['linear']:+.2f} %")
+    if res.get("mat_rows"):
+        L.append("  mat edge            " + "  ->  ".join(f"Y {y:.0f}" for y in res["mat_rows"])
+                 + "   (each photo to its own)")
+    if not res["ok"]:
+        L.append("  WARNING: one of the two photos was marked broken - look at pair.png")
+    L += ["", "  (full detail: summary.txt; outlines checked in pair.png)"]
+    return "\n".join(L) + "\n"
+
+
 def _crop_txt(roi):
     return ",".join(str(int(v)) for v in roi) if roi else "whole frame"
 
 
 def results_text(res):
+    if res.get("mode") == "before_after":
+        return before_after_text(res)
     a, b, n_used, n = res["series_span"]
     L = ["=" * 72, f" RESULTS  {os.path.basename(res['folder'])}", "=" * 72,
          "",

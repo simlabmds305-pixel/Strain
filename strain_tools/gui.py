@@ -73,7 +73,7 @@ class App:
         # ---- the two images
         pics = ttk.Frame(root)
         pics.pack(**pad)
-        lf1 = ttk.LabelFrame(pics, text="First image - drag a box round the bead")
+        self.lf1 = lf1 = ttk.LabelFrame(pics, text=self.LF1_SERIES)
         lf1.grid(row=0, column=0, padx=4)
         self.lf2 = lf2 = ttk.LabelFrame(pics, text=self.LF2_SAME)
         lf2.grid(row=0, column=1, padx=4)
@@ -100,26 +100,33 @@ class App:
         ttk.Button(opt, text="Whole frame", command=lambda: self.set_roi(None)).grid(
             row=0, column=2, sticky="w")
 
+        # before + after only (humidity sets): two photos, a box on each
+        self.ba = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt, text="Before + after photos only (no time-lapse) - drag a "
+                        "separate box on EACH photo", variable=self.ba,
+                        command=self.toggle_ba).grid(row=0, column=3, columnspan=3,
+                                                     sticky="w", padx=(20, 0))
         ttk.Label(opt, text="Seconds between images:").grid(row=1, column=0, sticky="w")
         self.interval = tk.StringVar(value=str(self.saved.get("interval") or 60))
         ttk.Entry(opt, textvariable=self.interval, width=8).grid(row=1, column=1, sticky="w",
                                                                  padx=6)
         self.last_final = tk.BooleanVar(value=bool(self.saved.get("last_is_final", True)))
-        ttk.Checkbutton(opt, text="Last image is the final photo (leave it out of the "
-                        "time-lapse)", variable=self.last_final,
-                        command=self.refresh_info).grid(row=2, column=0, columnspan=3,
-                                                        sticky="w")
+        self.cb_final = ttk.Checkbutton(opt, text="Last image is the final photo (leave it out "
+                                        "of the time-lapse)", variable=self.last_final,
+                                        command=self.refresh_info)
+        self.cb_final.grid(row=2, column=0, columnspan=3, sticky="w")
         self.first_last = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt, text="Also measure the first + last image only",
-                        variable=self.first_last).grid(row=3, column=0, columnspan=3,
-                                                       sticky="w")
+        self.cb_fl = ttk.Checkbutton(opt, text="Also measure the first + last image only",
+                                     variable=self.first_last)
+        self.cb_fl.grid(row=3, column=0, columnspan=3, sticky="w")
         self.own_crop = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="Own crop for the last image in first + last (drag it on "
-                        "the last image - for a final photo taken after the stage moved)",
-                        variable=self.own_crop, command=self.toggle_own_crop).grid(
-            row=3, column=3, columnspan=3, sticky="w", padx=(20, 0))
-        ttk.Label(opt, text="Last-image crop:").grid(row=4, column=3, sticky="e",
-                                                     padx=(20, 0))
+        self.cb_own = ttk.Checkbutton(opt, text="Own crop for the last image in first + last "
+                                      "(drag it on the last image - for a final photo taken "
+                                      "after the stage moved)",
+                                      variable=self.own_crop, command=self.toggle_own_crop)
+        self.cb_own.grid(row=3, column=3, columnspan=3, sticky="w", padx=(20, 0))
+        self.l_roi2 = ttk.Label(opt, text="Last-image crop:")
+        self.l_roi2.grid(row=4, column=3, sticky="e", padx=(20, 0))
         self.roi2_txt = tk.StringVar()
         r2 = ttk.Entry(opt, textvariable=self.roi2_txt, width=26)
         r2.grid(row=4, column=4, sticky="w", padx=6)
@@ -251,17 +258,42 @@ class App:
             per2 = self.saved.get("rois_last", {})
             self.toff.set(str(self.saved.get("thresh_offsets", {}).get(d, 0)))
             self.roi2 = tuple(per2[d]) if d in per2 else None
-            self.own_crop.set(self.roi2 is not None)
+            # a folder of just two photos is a before + after set (humidity)
+            self.ba.set(len(allp) == 2)
+            self.own_crop.set(self.roi2 is not None and not self.ba.get())
             self.set_roi(tuple(per[d]) if d in per else None)
         else:
             self.set_roi(self.roi)
+        self.toggle_ba()
+
+    def toggle_ba(self):
+        ba = self.ba.get()
+        if ba and getattr(self, "all_paths", None) and len(self.all_paths) != 2:
+            self.ba.set(False)
+            self.status.set(f"Before + after needs a folder of exactly 2 photos - this one has "
+                            f"{len(self.all_paths)}.")
+            ba = False
+        self.lf1.config(text=self.LF1_BA if ba else self.LF1_SERIES)
+        for w in (self.cb_final, self.cb_fl, self.cb_own):
+            w.state(["disabled"] if ba else ["!disabled"])
+        self.l_roi2.config(text="After-photo crop:" if ba else "Last-image crop:")
+        if ba and not self.roi2 and self.roi:
+            self.roi2 = self.roi
         self.toggle_own_crop()
         self.refresh_info()
+
+    def two_boxes(self):
+        """True when the second picture takes its own box."""
+        return self.ba.get() or self.own_crop.get()
 
     def refresh_info(self):
         if not getattr(self, "all_paths", None):
             return
         n = len(self.all_paths)
+        if self.ba.get():
+            self.info.set(f"BEFORE + AFTER   before: {self.names[0]}   after: {self.names[1]}"
+                          "   -> drag a box round the bead on EACH photo, then RUN")
+            return
         series = n - 1 if self.last_final.get() else n
         fin = (f"   final photo: {self.names[1]}" if self.last_final.get() else "")
         self.info.set(f"{n} images   first: {self.names[0]}   last: {self.names[1]}   "
@@ -274,8 +306,11 @@ class App:
         return self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
 
     # -------------------------------------------------------------- crop
+    LF1_SERIES = "First image - drag a box round the bead"
+    LF1_BA = "BEFORE photo - drag a box round the bead"
     LF2_SAME = "Last image - the same box, check the bead fits"
     LF2_OWN = "Last image - drag its OWN box (used only in first + last)"
+    LF2_BA = "AFTER photo - drag its OWN box round the bead"
 
     def _box(self, c, roi, colour):
         c.delete("box")
@@ -294,22 +329,23 @@ class App:
         self.redraw_last()
 
     def redraw_last(self):
-        own = self.own_crop.get()
+        own = self.two_boxes()
         r = (self.roi2 or self.roi) if own else self.roi
         self._box(self.c2, r, "#34c759" if own and self.roi2 else "#ff3b30")
         self.roi2_txt.set(",".join(str(v) for v in self.roi2) if own and self.roi2 else "")
         self.c2.config(cursor="crosshair" if own else "")
 
     def toggle_own_crop(self):
-        own = self.own_crop.get()
-        self.lf2.config(text=self.LF2_OWN if own else self.LF2_SAME)
+        own = self.two_boxes()
+        self.lf2.config(text=self.LF2_BA if self.ba.get() else
+                        self.LF2_OWN if own else self.LF2_SAME)
         if own and not self.roi2 and self.roi:
             self.roi2 = self.roi             # start from the time-lapse's box
         self.redraw_last()
 
     def typed_roi2(self):
         t = self.roi2_txt.get().strip()
-        if not self.own_crop.get():
+        if not self.two_boxes():
             return
         try:
             self.set_roi2(rl.parse_roi(t) if t else None)
@@ -327,7 +363,7 @@ class App:
             self.status.set("Crop must be four numbers: x0,x1,y0,y1")
 
     def _drag_ok(self, which):
-        return which == 1 or self.own_crop.get()
+        return which == 1 or self.two_boxes()
 
     def drag_start(self, ev, which=1):
         self.drag0 = (ev.x, ev.y) if self._drag_ok(which) else None
@@ -386,7 +422,10 @@ class App:
         rois = dict(self.saved.get("rois", {}))
         if self.roi:
             rois[d] = list(self.roi)
-        pair_roi = self.roi2 if self.own_crop.get() and self.roi2 else None
+        ba = self.ba.get()
+        if ba and not self.roi2:
+            self.roi2 = self.roi
+        pair_roi = self.roi2 if self.two_boxes() and self.roi2 else None
         toffs = dict(self.saved.get("thresh_offsets", {}))
         toffs[d] = toff
         rois_last = dict(self.saved.get("rois_last", {}))
@@ -407,14 +446,19 @@ class App:
         self.out.delete("1.0", "end")
         self.bar["value"] = 0
         self.status.set("measuring images...")
-        args = (d, cfg, self.skips(), self.last_final.get(), self.first_last.get(), pair_roi)
+        args = (d, cfg, self.skips(), self.last_final.get(), self.first_last.get(), pair_roi,
+                ba)
         threading.Thread(target=self.work, args=args, daemon=True).start()
 
-    def work(self, d, cfg, skip, last_final, first_last, pair_roi=None):
+    def work(self, d, cfg, skip, last_final, first_last, pair_roi=None, ba=False):
         try:
-            res = rl.analyse_set(d, cfg, "analysis", "*", skip, last_final, first_last,
-                                 quiet=True, pair_roi=pair_roi,
-                                 progress=lambda i, n: self.q.put(("prog", i, n)))
+            prog = lambda i, n: self.q.put(("prog", i, n))  # noqa: E731
+            if ba:
+                res = rl.analyse_before_after(d, cfg, cfg.get("ROI"), pair_roi, "analysis",
+                                              skip, quiet=True, progress=prog)
+            else:
+                res = rl.analyse_set(d, cfg, "analysis", "*", skip, last_final, first_last,
+                                     quiet=True, pair_roi=pair_roi, progress=prog)
             self.q.put(("done", res))
         except BaseException as e:
             self.q.put(("fail", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
@@ -456,6 +500,12 @@ class App:
         self.bar["value"] = self.bar["maximum"]
         self.status.set(f"done - saved in {res['outdir']}")
         self.out.insert("end", rl.results_text(res))
+        if res.get("mode") == "before_after":
+            # two photos: summary, the outlines (pair.png) and the folder -- no
+            # time plots, and these sets are not part of the time-lapse master
+            for b in (self.b_sum, self.b_pair, self.b_dir):
+                b.state(["!disabled"])
+            return
         for b in (self.b_sum, self.b_plot, self.b_mat, self.b_dir):
             b.state(["!disabled"])
         if res.get("pairdir"):
