@@ -28,7 +28,7 @@
 #    step_changes.png    what each step did (rise = swelling, fall = drying)
 #    strain_vs_time.png  the same against real time (time-lapse: broken axis)
 #    photo_sheet.png     each photo's crop, aligned on the bead: fresh outline
-#                        cyan dashed, this one red, lost band yellow, gained blue
+#                        cyan dashed, this one red dotted, no fill
 #    outlines.png        every outline on one picture, aligned on the mat
 #    blocks/<n>/height_track.png, radius_track.png, per_image.csv  (time-lapse)
 #
@@ -621,15 +621,12 @@ def plot_sheet(t, cfgs, outdir):
             ax.set_title(f"{int(r['step'])}. {r['label']}: not measured", fontsize=9)
             continue
         img, m = w
+        # lines only, no fill: the bead's own edge must stay visible under them
         ax.imshow(img, cmap="gray", vmin=0, vmax=255)
-        over = np.zeros(m.shape + (4,), np.uint8)
-        over[ref & ~m] = (250, 204, 21, 170)       # lost since step 1
-        over[m & ~ref] = (59, 130, 246, 170)       # gained since step 1
-        ax.imshow(over, interpolation="nearest")
         if k and ref.any():
             ax.contour(ref, levels=[0.5], colors=[CYAN], linewidths=1.0, linestyles="--")
         if m.any():
-            ax.contour(m, levels=[0.5], colors=[RED], linewidths=1.1)
+            ax.contour(m, levels=[0.5], colors=[RED], linewidths=1.1, linestyles=":")
         ax.axhline(H, color="white", ls=":", lw=0.9)
         ax.set_title(f"{int(r['step'])}. {r['label']}   {r['taken'][5:16]}\n"
                      f"V {r['vol_strain_pct']:+.1f}%   h {r['h_um']:,.0f} um "
@@ -642,9 +639,9 @@ def plot_sheet(t, cfgs, outdir):
     ax.plot([10, 10 + bar], [H + below * 0.6] * 2, color="white", lw=3)
     ax.text(10 + bar / 2, H + below * 0.45, "500 um", color="white", ha="center",
             va="bottom", fontsize=7)
-    fig.suptitle("Every photo lined up on the bead (middle) and the mat (dotted).  "
-                 "cyan dashed = step 1's outline, red = this one;  yellow = lost since "
-                 "step 1, blue = gained", fontsize=9.5, color=INK)
+    fig.suptitle("Every photo lined up on the bead (middle) and the mat (white dotted).  "
+                 "red dotted = the outline measured on this photo,  cyan dashed = step 1's "
+                 "outline", fontsize=9.5, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     rl.save_fig(fig, os.path.join(outdir, "photo_sheet.png"))
     plt.close(fig)
