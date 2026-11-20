@@ -421,6 +421,34 @@ def measure_one(args):
 
 
 BASE_LINE_BAND_PX = 60      # drawn base: rows above the line in which its ends bound the bead
+BASE_WALL_FIT_PX = 60       # rows above that band the bead's sides are fitted on
+BASE_WALL_MARGIN_PX = 4     # slack either side of the carried-down sides
+
+
+def clamp_base_to_walls(mask, yline, band=BASE_LINE_BAND_PX, fit=BASE_WALL_FIT_PX,
+                        margin=BASE_WALL_MARGIN_PX):
+    """In the blurred band just above a drawn base, keep only what lies between
+    the bead's own sides: each side is fitted (straight line, x against row) on
+    the rows just above the band, where the edge is sharp and no mat colour
+    reaches, and carried down to the line.  Anything outside -- a foot of
+    mat glow left by a line drawn past the bead's corner -- is dropped."""
+    H, W = mask.shape
+    top = int(np.floor(float(np.median(yline)) - band))
+    rows = [r for r in range(max(0, top - fit), max(0, min(H, top))) if mask[r].any()]
+    if len(rows) < 10:
+        return mask                       # too little bead above the band to fit on
+    left = [int(np.argmax(mask[r] > 0)) for r in rows]
+    right = [W - 1 - int(np.argmax(mask[r][::-1] > 0)) for r in rows]
+    pl, pr = np.polyfit(rows, left, 1), np.polyfit(rows, right, 1)
+    out = mask.copy()
+    for r in range(max(0, top), H):
+        lo = int(np.floor(np.polyval(pl, r) - margin))
+        hi = int(np.ceil(np.polyval(pr, r) + margin))
+        if lo > 0:
+            out[r, :min(W, lo)] = 0
+        if hi < W - 1:
+            out[r, max(0, hi + 1):] = 0
+    return out
 
 
 def _measure_one(path, cfg, want_mask=False):
@@ -501,6 +529,10 @@ def _measure_one(path, cfg, want_mask=False):
         # with a drawn base too: a line drawn past the bead's corner lets the
         # blue mat strip beside the base in, and this cuts exactly that shape
         mask, leak_rows = trim_foot_leak(mask)
+    if line:
+        # and whatever foot is left: the bead's sides, carried straight down
+        # into the blurred band, are its edges -- not the line's ends
+        mask = clamp_base_to_walls(mask, yline)
 
     pr = profile_from_mask(mask)
     if pr is None:
