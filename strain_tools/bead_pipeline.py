@@ -420,7 +420,15 @@ def measure_one(args):
                 "error": f"{type(e).__name__}: {e}"}
 
 
+BASE_LINE_BAND_PX = 60      # drawn base: rows above the line in which its ends bound the bead
+
+
 def _measure_one(path, cfg, want_mask=False):
+    # one photo can carry its own settings (Humidity Cycles: a baseline drawn
+    # by hand on a blurred base).  Nothing sets this in the main app.
+    over = (cfg.get("PER_IMAGE") or {}).get(os.path.basename(path))
+    if over:
+        cfg = dict(cfg, **over)
     bgr = cv2.imread(path, cv2.IMREAD_COLOR)
     if bgr is None:
         raise FileNotFoundError(f"could not read image: {path}")
@@ -464,9 +472,33 @@ def _measure_one(path, cfg, want_mask=False):
         if float(coloured.mean()) > 0.02:        # a real population, not a stray pixel
             mask[coloured] = 0
 
+    # BASE_LINE (x0, y0, x1, y1, full-image px): the bead's base drawn by hand.
+    # Everything below the line is dropped; everything above it counts, blue
+    # smear from an out-of-focus mat included (pair it with MAT_CHROMA_MIN=255).
+    line = cfg.get("BASE_LINE")
+    if line:
+        lx0, ly0, lx1, ly1 = (float(v) for v in line)
+        slope = (ly1 - ly0) / (lx1 - lx0) if lx1 != lx0 else 0.0
+        icpt = ly0 - slope * lx0
+        cols = np.arange(x0, x1, dtype=np.float64)
+        yline = slope * cols + icpt - y0                                   # crop rows
+        rr = np.arange(mask.shape[0])[:, None]
+        mask[rr > yline[None, :]] = 0
+        # the line's ends are the bead's corners: just above the line, mat
+        # outside them is not bead (the sides higher up are left alone)
+        outside = (cols < min(lx0, lx1)) | (cols > max(lx0, lx1))
+        mask[(rr > yline[None, :] - BASE_LINE_BAND_PX) & outside[None, :]] = 0
+
     mask = clean_mask(mask, close_px=cfg["CLOSE_PX"], fill_holes=cfg["FILL_HOLES"])
+    if line:
+        # closing can bridge a row back over the line; keep the floor where drawn
+        mask[rr > yline[None, :]] = 0
+        mask[(rr > yline[None, :] - BASE_LINE_BAND_PX) & outside[None, :]] = 0
     mask = pick_blob(mask, cfg["BLOB_CHOICE"])
-    mask, leak_rows = trim_foot_leak(mask)
+    if line:
+        leak_rows = 0            # no mat above a drawn base, so nothing to trim
+    else:
+        mask, leak_rows = trim_foot_leak(mask)
 
     pr = profile_from_mask(mask)
     if pr is None:
@@ -514,6 +546,14 @@ def _measure_one(path, cfg, want_mask=False):
             if under is not None:
                 out["mat_y_line"] = out["mat_y"]
                 out["mat_y"] = under + cfg["BASELINE_TUNE"]
+
+    if line:
+        # the drawn line IS the floor: read it where the bead sits
+        xc = float((out["xl"] + out["xr"])[len(rows) // 2] / 2.0)
+        out["mat_fit"] = (slope, icpt)
+        out["mat_y"] = slope * xc + icpt
+        out["mat_tilt_deg"] = float(np.degrees(np.arctan(slope)))
+        out["base_drawn"] = True
 
     if want_mask:
         out["mask"] = mask

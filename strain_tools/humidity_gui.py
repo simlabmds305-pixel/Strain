@@ -29,7 +29,8 @@ import cv2                  # noqa: E402
 import humidity as hu       # noqa: E402
 import run_local as rl      # noqa: E402
 
-VIEW_W, VIEW_H = 680, 440
+VIEW_W, VIEW_H = 680, 380
+STRIP_H, STRIP_ZOOM = 150, 2    # the two magnified ends of a drawn baseline
 KEY = "humidity"            # this window's part of app_settings.json
 
 
@@ -121,13 +122,13 @@ class App:
         mid.pack(fill="x", **pad)
         left = ttk.Frame(mid)
         left.pack(side="left", fill="y")
-        cols = ("n", "label", "files", "taken", "box")
+        cols = ("n", "label", "files", "taken", "box", "base")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", height=10,
                                  selectmode="browse")
-        for c, w, t in (("n", 34, "#"), ("label", 170, "label"), ("files", 270, "photo(s)"),
-                        ("taken", 150, "taken"), ("box", 48, "box")):
+        for c, w, t in (("n", 34, "#"), ("label", 160, "label"), ("files", 250, "photo(s)"),
+                        ("taken", 140, "taken"), ("box", 44, "box"), ("base", 70, "baseline")):
             self.tree.heading(c, text=t)
-            self.tree.column(c, width=w, anchor="w" if c != "box" else "center")
+            self.tree.column(c, width=w, anchor="w" if c not in ("box", "base") else "center")
         self.tree.pack(fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.on_select())
         ed = ttk.Frame(left)
@@ -149,6 +150,33 @@ class App:
                    ).pack(side="left", padx=4)
         ttk.Button(bb, text="Clear this box", command=self.clear_box).pack(side="left")
 
+        # ---- baseline drawn by hand (blurred base: blue smear counted as bead)
+        bl = ttk.LabelFrame(left, text="Baseline (optional) - where the bead sits on the mat")
+        bl.pack(fill="x", pady=(10, 0))
+        mr = ttk.Frame(bl)
+        mr.pack(fill="x", padx=4, pady=2)
+        ttk.Label(mr, text="Dragging on the picture draws:").pack(side="left")
+        self.mode = tk.StringVar(value="box")
+        ttk.Radiobutton(mr, text="the box", variable=self.mode, value="box",
+                        command=self.draw_preview).pack(
+            side="left", padx=4)
+        ttk.Radiobutton(mr, text="the baseline (drag along the base)", variable=self.mode,
+                        value="base", command=self.draw_preview).pack(side="left")
+        nr = ttk.Frame(bl)
+        nr.pack(fill="x", padx=4, pady=2)
+        for txt, dl, dr in (("whole line ▲", -1, -1), ("▼", 1, 1),
+                            ("   left end ▲", -1, 0), ("▼", 1, 0),
+                            ("   right end ▲", 0, -1), ("▼", 0, 1)):
+            ttk.Button(nr, text=txt.strip(), width=max(3, len(txt.strip()) + 1),
+                       command=lambda a=dl, b=dr: self.nudge(a, b)).pack(side="left", padx=1)
+        ttk.Button(nr, text="Clear baseline", command=self.clear_base).pack(side="left",
+                                                                          padx=(10, 0))
+        ttk.Label(bl, text="With a baseline the bead is measured down to the line; everything "
+                  "below it is dropped and everything above it counts as bead, blue smear from "
+                  "a blurred mat included.  The arrows move it 1 pixel; check it in the zoomed "
+                  "strip under the picture.", foreground="#555", wraplength=520,
+                  justify="left").pack(anchor="w", padx=4, pady=(0, 4))
+
         right = ttk.Frame(mid)
         right.pack(side="left", padx=(12, 0))
         self.lf = ttk.LabelFrame(right, text="Select a step on the left")
@@ -159,6 +187,11 @@ class App:
         self.cv.bind("<ButtonPress-1>", self.drag_start)
         self.cv.bind("<B1-Motion>", self.drag_move)
         self.cv.bind("<ButtonRelease-1>", self.drag_end)
+        self.strip = tk.Canvas(self.lf, width=VIEW_W, height=STRIP_H, bg="#111",
+                               highlightthickness=0)
+        self.strip.pack(padx=4, pady=(0, 4))
+        self.strip_img = None
+        self.full_img = (None, None)          # (path, full-resolution BGR) of the preview
         self.show_last = tk.BooleanVar(value=False)
         self.cb_last = ttk.Checkbutton(right, text="show this block's LAST frame (check the bead "
                                        "stays inside the box)", variable=self.show_last,
@@ -182,7 +215,7 @@ class App:
         btns.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
         sb = ttk.Scrollbar(rf, orient="vertical")
         sb.pack(side="right", fill="y", pady=4)
-        self.out = tk.Text(rf, height=8, font=("Consolas", 9), wrap="none",
+        self.out = tk.Text(rf, height=6, font=("Consolas", 9), wrap="none",
                            yscrollcommand=sb.set)
         self.out.pack(fill="both", expand=True, padx=4, pady=4)
         sb.config(command=self.out.yview)
@@ -267,6 +300,8 @@ class App:
         rois = dict(saved.get("rois_t", {}),
                     **{_tkey(it["time"]): it["roi"] for it in self.items if it.get("roi")})
         rois_by_name = saved.get("rois", {})          # older saves
+        bases = dict(saved.get("bases_t", {}),
+                     **{_tkey(it["time"]): it["base"] for it in self.items if it.get("base")})
         ph = sorted(self.photos_all, key=(lambda p: p["time"]) if self.order.get() == "time"
                     else (lambda p: hu.bp.natural_key(p["path"])))
         clash = hu.order_clash(self.photos_all)
@@ -274,7 +309,8 @@ class App:
             defaults = hu.default_photo_labels(ph)
             self.items = [dict(paths=[p["path"]], name=p["name"], time=p["time"],
                                label=typed.get(_tkey(p["time"]), lab), default=lab,
-                               roi=rois.get(_tkey(p["time"])) or rois_by_name.get(p["name"]))
+                               roi=rois.get(_tkey(p["time"])) or rois_by_name.get(p["name"]),
+                               base=bases.get(_tkey(p["time"])))
                           for p, lab in zip(ph, defaults)]
             self.cb_last.state(["disabled"])
             self.show_last.set(False)
@@ -289,7 +325,8 @@ class App:
                                time=b[0]["time"], end=b[-1]["time"],
                                label=typed.get(_tkey(b[0]["time"]), lab), default=lab,
                                roi=rois.get(_tkey(b[0]["time"]))
-                               or rois_by_name.get(b[0]["name"]))
+                               or rois_by_name.get(b[0]["name"]),
+                               base=bases.get(_tkey(b[0]["time"])))
                           for b, lab in zip(blocks, defaults)]
             self.cb_last.state(["!disabled"])
         n = len(self.photos_all)
@@ -323,12 +360,14 @@ class App:
                 mins = (it["end"] - it["time"]).total_seconds() / 60
                 taken = f"{it['time'].strftime('%d-%m %H:%M')} +{mins:.0f}m"
             self.tree.insert("", "end", iid=str(i), values=(
-                i + 1, it["label"], files, taken, "yes" if it.get("roi") else "-"))
+                i + 1, it["label"], files, taken, "yes" if it.get("roi") else "-",
+                "drawn" if it.get("base") else "-"))
 
     def refresh_row(self, i):
         it = self.items[i]
         vals = list(self.tree.item(str(i), "values"))
         vals[1], vals[4] = it["label"], "yes" if it.get("roi") else "-"
+        vals[5] = "drawn" if it.get("base") else "-"
         self.tree.item(str(i), values=vals)
 
     # ------------------------------------------------------------ editing
@@ -367,6 +406,69 @@ class App:
             self.refresh_row(self.sel)
             self.draw_preview()
 
+    def clear_base(self):
+        if self.sel is not None:
+            self.items[self.sel]["base"] = None
+            self.refresh_row(self.sel)
+            self.draw_preview()
+
+    def nudge(self, dl, dr):
+        """Move the baseline's left / right end by whole pixels (down = +)."""
+        if self.sel is None or not self.items[self.sel].get("base"):
+            self.status.set("Draw a baseline first: choose 'the baseline' and drag along the "
+                            "bead's base.")
+            return
+        x0, y0, x1, y1 = self.items[self.sel]["base"]
+        self.items[self.sel]["base"] = (x0, y0 + dl, x1, y1 + dr)
+        self.draw_preview()
+
+    def _full(self, path):
+        if self.full_img[0] != path:
+            self.full_img = (path, cv2.imread(path))
+        return self.full_img[1]
+
+    def draw_strip(self, path, it):
+        """The base, zoomed: STRIP_ROWS image rows round the line across the box,
+        stretched to STRIP_H screen px, with the line on it."""
+        self.strip.delete("all")
+        base = it.get("base")
+        if not base:
+            self.strip.create_text(VIEW_W // 2, STRIP_H // 2, fill="#888",
+                                   text="the zoomed base appears here once a baseline is drawn")
+            return
+        bgr = self._full(path)
+        if bgr is None:
+            return
+        H, W = bgr.shape[:2]
+        lx0, ly0, lx1, ly1 = base
+        slope = (ly1 - ly0) / (lx1 - lx0) if lx1 != lx0 else 0.0
+        half = VIEW_W // 2
+        ww, wh = int(half / STRIP_ZOOM), int(STRIP_H / STRIP_ZOOM)   # image px per panel
+        panels = []
+        for k, (ex, ey) in enumerate(((lx0, ly0), (lx1, ly1))):
+            cx0 = int(max(0, min(W - ww, ex - ww // 2)))
+            cy0 = int(max(0, min(H - wh, ey - wh * 0.6)))
+            win = cv2.normalize(bgr[cy0:cy0 + wh, cx0:cx0 + ww], None, 0, 255,
+                                cv2.NORM_MINMAX)          # stretch: the blur is low-contrast
+            panels.append(cv2.resize(win, (half, STRIP_H), interpolation=cv2.INTER_NEAREST))
+            # where the line runs through this panel
+            ya = (ly0 + slope * (cx0 - lx0) - cy0) * STRIP_ZOOM
+            yb = (ly0 + slope * (cx0 + ww - lx0) - cy0) * STRIP_ZOOM
+            panels[-1] = (panels[-1], k * half, ya, yb, (ex - cx0) * STRIP_ZOOM + k * half,
+                          (ey - cy0) * STRIP_ZOOM)
+        img = cv2.hconcat([p[0] for p in panels])
+        ok, png = cv2.imencode(".png", img)
+        self.strip_img = self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
+        self.strip.create_image(0, 0, anchor="nw", image=self.strip_img)
+        for _, off, ya, yb, ex, ey in panels:
+            self.strip.create_line(off, ya, off + half, yb, fill="#ff2d95", width=2)
+            self.strip.create_oval(ex - 4, ey - 4, ex + 4, ey + 4, outline="#ffcc00", width=2)
+        self.strip.create_line(half, 0, half, STRIP_H, fill="#ffffff")
+        self.strip.create_text(6, 4, anchor="nw", fill="#ffcc00", text=(
+            f"LEFT end, {STRIP_ZOOM}x   (line Y {ly0:.0f})"))
+        self.strip.create_text(half + 6, 4, anchor="nw", fill="#ffcc00", text=(
+            f"RIGHT end, {STRIP_ZOOM}x   (line Y {ly1:.0f})"))
+
     # ------------------------------------------------------------ picture
     def _image(self, path):
         if path not in self.cache:
@@ -398,10 +500,14 @@ class App:
         self.cv.create_image(0, 0, anchor="nw", image=self.photo)
         self.lf.config(text=f"{self.sel + 1}. {it['label']}  -  {os.path.basename(path)}"
                        + ("  (LAST frame of the block)" if last else "")
-                       + "  -  drag a box round the bead")
+                       + ("  -  drag along the bead's BASE" if self.mode.get() == "base"
+                          else "  -  drag a box round the bead"))
         if it.get("roi"):
             x0, x1, y0, y1 = (v * self.scale for v in it["roi"])
             self.cv.create_rectangle(x0, y0, x1, y1, outline="#34c759", width=2, tags="box")
+        if it.get("base"):
+            self.cv.create_line(*(v * self.scale for v in it["base"]), fill="#ff2d95", width=2)
+        self.draw_strip(path, it)
 
     def drag_start(self, ev):
         self.drag0 = (ev.x, ev.y) if self.sel is not None else None
@@ -409,8 +515,12 @@ class App:
     def drag_move(self, ev):
         if self.drag0:
             self.cv.delete("drag")
-            self.cv.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
-                                     dash=(4, 2), tags="drag")
+            if self.mode.get() == "base":
+                self.cv.create_line(*self.drag0, ev.x, ev.y, fill="#ff2d95", width=2,
+                                    dash=(4, 2), tags="drag")
+            else:
+                self.cv.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
+                                         dash=(4, 2), tags="drag")
 
     def drag_end(self, ev):
         if not self.drag0 or not self.full[0]:
@@ -418,6 +528,15 @@ class App:
         self.cv.delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        if self.mode.get() == "base":
+            (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
+                                             (ev.x / self.scale, ev.y / self.scale)])
+            if px1 - px0 < 20:
+                return
+            self.items[self.sel]["base"] = (round(px0), round(py0), round(px1), round(py1))
+            self.refresh_row(self.sel)
+            self.draw_preview()
+            return
         x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
         y0, y1 = sorted((ay / self.scale, ev.y / self.scale))
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
@@ -446,7 +565,11 @@ class App:
                        toff=self.toff.get(), labels_typed=typed,
                        rois_t=dict(old.get("rois_t", {}),
                                    **{_tkey(it["time"]): list(it["roi"]) for it in self.items
-                                      if it.get("roi")}))
+                                      if it.get("roi")}),
+                       bases_t={**{k: v for k, v in old.get("bases_t", {}).items()
+                                   if k not in here},
+                                **{_tkey(it["time"]): list(it["base"]) for it in self.items
+                                   if it.get("base")}})
         self.mine = dict(self.mine, last_dir=d, sets=sets)
         allset = rl.load_settings()
         allset[KEY] = self.mine
@@ -487,11 +610,13 @@ class App:
             prog = lambda i, n: self.q.put(("prog", i, n))  # noqa: E731
             if kind == "photos":
                 res = hu.analyse_photos(d, [dict(path=it["paths"][0], label=it["label"],
-                                                 roi=it["roi"]) for it in items],
+                                                 roi=it["roi"], base=it.get("base"))
+                                            for it in items],
                                         toff, progress=prog)
             else:
                 res = hu.analyse_blocks(d, [dict(paths=it["paths"], label=it["label"],
-                                                 roi=it["roi"]) for it in items],
+                                                 roi=it["roi"], base=it.get("base"))
+                                            for it in items],
                                         toff, progress=prog)
             self.q.put(("done", res))
         except BaseException as e:

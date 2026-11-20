@@ -146,6 +146,13 @@ def _clock(p):
     return t.strftime("%d-%m %H:%M")
 
 
+def base_override(line):
+    """Settings for a photo whose base was drawn by hand: the line is the floor,
+    and nothing above it is thrown away for being blue (an out-of-focus mat
+    smears blue into the bottom of the bead)."""
+    return dict(BASE_LINE=tuple(float(v) for v in line), MAT_CHROMA_MIN=255)
+
+
 def base_cfg(toff=0):
     return dict(SCALE_PX_PER_UM=SCALE, INVERT=False, MANUAL_THRESH=None,
                 THRESH_OFFSET=int(toff), SEGMENT_METHOD="otsu",
@@ -180,7 +187,9 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
     per = {os.path.basename(it["path"]): tuple(int(v) for v in it["roi"])
            for it in items if it.get("roi")}
     cfg = dict(base_cfg(toff), PAIR_MODE=True, ROI_PER_IMAGE=per,
-               ROI=tuple(items[0]["roi"]) if items[0].get("roi") else None)
+               ROI=tuple(items[0]["roi"]) if items[0].get("roi") else None,
+               PER_IMAGE={os.path.basename(it["path"]): base_override(it["base"])
+                          for it in items if it.get("base")})
     df, info = bp.analyse_folder(paths, cfg, workers=workers, progress=progress)
     by = {r["image"]: r for _, r in df.iterrows()}
     t0 = capture_time(paths[0])
@@ -202,7 +211,8 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
                          contact_angle_deg=float(r.get("contact_angle_deg", np.nan)),
                          mat_y=float(r["baseline_y"]), tier=r.get("tier", ""),
                          use=bool(r.get("use", True)),
-                         crop=",".join(str(v) for v in per.get(nm, ())) or "whole frame"))
+                         crop=",".join(str(v) for v in per.get(nm, ())) or "whole frame",
+                         base="drawn" if it.get("base") else "mat edge"))
     if len(rows) < 2:
         raise RuntimeError("fewer than two photos could be measured: "
                            + ", ".join(failed or ["?"]))
@@ -216,7 +226,8 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
     with open(os.path.join(outdir, "settings.json"), "w") as f:
         json.dump(dict(mode="photos", thresh_offset=toff,
                        items=[dict(image=os.path.basename(it["path"]), label=it["label"],
-                                   roi=list(it["roi"]) if it.get("roi") else None)
+                                   roi=list(it["roi"]) if it.get("roi") else None,
+                                   base=list(it["base"]) if it.get("base") else None)
                               for it in items]), f, indent=2)
     return res
 
@@ -230,7 +241,8 @@ def analyse_blocks(folder, blocks, toff=0, out_name=OUT_NAME, progress=None, wor
     frames, first_info, done, cfgs = [], None, 0, {}
     for bi, b in enumerate(blocks):
         cfg = dict(base_cfg(toff), INTERVAL_S=60.0,
-                   ROI=tuple(int(v) for v in b["roi"]) if b.get("roi") else None)
+                   ROI=tuple(int(v) for v in b["roi"]) if b.get("roi") else None,
+                   **(base_override(b["base"]) if b.get("base") else {}))
         if first_info is not None:
             # same estimators and weights as the first block: a volume from block
             # 3 must be the same kind of number as the fresh bead's
@@ -292,7 +304,7 @@ def analyse_blocks(folder, blocks, toff=0, out_name=OUT_NAME, progress=None, wor
                blocks=[dict(label=b["label"], n=len(b["paths"]),
                             first=os.path.basename(b["paths"][0]),
                             last=os.path.basename(b["paths"][-1]),
-                            roi=b.get("roi")) for b in blocks],
+                            roi=b.get("roi"), base=b.get("base")) for b in blocks],
                deciders=list(first_info["deciders"]), toff=toff, failed=[],
                notes=list(first_info.get("notes", [])))
     _write_all(res, t, cfgs, frames=fr)
@@ -300,7 +312,8 @@ def analyse_blocks(folder, blocks, toff=0, out_name=OUT_NAME, progress=None, wor
         json.dump(dict(mode="timelapse", thresh_offset=toff, gap_min=GAP_MIN,
                        blocks=[dict(label=b["label"], first=os.path.basename(b["paths"][0]),
                                     last=os.path.basename(b["paths"][-1]), n=len(b["paths"]),
-                                    roi=list(b["roi"]) if b.get("roi") else None)
+                                    roi=list(b["roi"]) if b.get("roi") else None,
+                                    base=list(b["base"]) if b.get("base") else None)
                                for b in blocks]), f, indent=2)
     return res
 
@@ -347,7 +360,8 @@ def summary_text(res):
         L.append("  blocks (recordings found from the gaps in capture time):")
         for i, b in enumerate(res["blocks"]):
             L.append(f"    {i + 1}. {b['label']:<24s} {b['n']:4d} frames  {b['first']} -> "
-                     f"{b['last']}   crop {rl._crop_txt(b['roi'])}")
+                     f"{b['last']}   crop {rl._crop_txt(b['roi'])}"
+                     + ("   base drawn by hand" if b.get("base") else ""))
         L += ["  start / end of each block = median of its first / last 3 frames", ""]
     hdr = (f"  {'#':>2s}  {'step':<28s} {'taken':<16s} {'h':>6s}  {'V mm3':>7s}  "
            f"{'vol %':>7s} {'chg %':>7s}  {'height %':>8s} {'chg %':>7s}  "
@@ -374,6 +388,10 @@ def summary_text(res):
             for _, r in swell.iterrows())]
     if res.get("failed"):
         L += ["", "  could not be measured: " + ", ".join(res["failed"])]
+    if "base" in t.columns and (t["base"] == "drawn").any():
+        L += ["", "  base drawn by hand (measured down to the drawn line, blue smear above it "
+              "counted as bead) on step(s): "
+              + ", ".join(str(int(s)) for s in t.loc[t["base"] == "drawn", "step"])]
     mats = t["mat_y"].to_numpy(float)
     if np.ptp(mats) > 10:
         L += ["", f"  mat edge moves {np.ptp(mats):.0f} px between steps (Y "
