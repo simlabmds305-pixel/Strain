@@ -220,13 +220,21 @@ class App:
         self.out.pack(fill="both", expand=True, padx=4, pady=4)
         sb.config(command=self.out.yview)
         self.rbtn = []
+        ttk.Label(btns, text="vs fresh:").pack(side="left", padx=(2, 0))
         for text, name in (("Strain at every step", "strain_steps.png"),
-                           ("What each step did", "step_changes.png"),
                            ("Strain vs time", "strain_vs_time.png"),
+                           ("|  vs photo before:", None),
+                           ("Change at every step", "change_steps.png"),
+                           ("Change vs time", "change_vs_time.png"),
+                           ("Change bars", "step_changes.png"),
+                           ("|", None),
                            ("Photo sheet", "photo_sheet.png"),
                            ("Outlines", "outlines.png"),
                            ("Summary", "summary.txt"),
                            ("Results folder", "")):
+            if name is None:                         # a separator label, not a button
+                ttk.Label(btns, text=text).pack(side="left", padx=(6, 0))
+                continue
             b = ttk.Button(btns, text=text, state="disabled",
                            command=lambda n=name: _open(os.path.join(self.res["outdir"], n)
                                                         if n else self.res["outdir"]))

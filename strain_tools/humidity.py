@@ -331,6 +331,11 @@ def _write_all(res, t, cfgs, frames=None):
             ("strain_vs_time.png", lambda o: (plot_timeline(frames, t, o, res)
                                               if frames is not None else
                                               plot_vs_hours(t, o, res))),
+            ("change_steps.png", lambda o: plot_steps(t, o, res, kind="change")),
+            ("change_vs_time.png", lambda o: (plot_timeline(vs_previous(frames), t, o, res,
+                                                            kind="change")
+                                              if frames is not None else
+                                              plot_vs_hours(t, o, res, kind="change"))),
             ("photo_sheet.png + outlines.png", lambda o: plot_sheet(t, cfgs, out))]
     for name, draw in jobs:
         try:
@@ -397,7 +402,9 @@ def summary_text(res):
         L += ["", f"  mat edge moves {np.ptp(mats):.0f} px between steps (Y "
               + " / ".join(f"{v:.0f}" for v in mats)
               + ") - each step is measured to its own mat edge."]
-    L += ["", "  plots: strain_steps . step_changes . strain_vs_time . photo_sheet . outlines",
+    L += ["", "  plots vs the fresh bead:     strain_steps . strain_vs_time",
+          "  plots vs the photo before:   change_steps . change_vs_time . step_changes (bars)",
+          "  pictures:                    photo_sheet . outlines",
           f"  saved to {res['outdir']}", ""]
     return "\n".join(L)
 
@@ -414,14 +421,20 @@ def _ticks(t):
 def _label_points(ax, x, y, fmt="{:+.1f}"):
     """Value next to each point, above where the curve goes down after it and
     below where it goes up, so the line never runs through a number."""
+    x = np.asarray(x, float)
+    span = float(np.nanmax(x) - np.nanmin(x)) or 1.0
     for i, (xi, yi) in enumerate(zip(x, y)):
         if not np.isfinite(yi):
             continue
         nxt = y[i + 1] if i + 1 < len(y) else (y[i - 1] if i else yi)
         prv = y[i - 1] if i else nxt
         up = yi >= (nxt + prv) / 2.0
-        ax.annotate(fmt.format(yi), (xi, yi), xytext=(0, 9 if up else -9),
-                    textcoords="offset points", ha="center",
+        # a neighbour this close in x: push the two numbers apart sideways
+        near_next = i + 1 < len(x) and x[i + 1] - xi < 0.05 * span
+        near_prev = i > 0 and xi - x[i - 1] < 0.05 * span
+        dx, ha = (-6, "right") if near_next else (6, "left") if near_prev else (0, "center")
+        ax.annotate(fmt.format(yi), (xi, yi), xytext=(dx, 9 if up else -9),
+                    textcoords="offset points", ha=ha,
                     va="bottom" if up else "top", fontsize=8.5, color=INK,
                     bbox=dict(boxstyle="round,pad=0.15", fc=SURFACE, ec="none", alpha=0.85))
 
@@ -441,23 +454,43 @@ def _legend_conditions(fig, labels):
     fig.legend(handles=hs, loc="lower center", ncol=len(hs), frameon=False, fontsize=9)
 
 
-def plot_steps(t, out, res):
+TITLES = {
+    "strain": ("Strain against the fresh bead at every step",
+               "Strain against real time (hours since the fresh photo)"),
+    "change": ("Change from the photo before, at every step  (up = swelled, down = shrank)",
+               "Change from the photo before, against real time  (up = swelled, down = shrank)"),
+}
+
+
+def _y(t, q, kind):
+    if kind == "change":
+        y = t[f"{q}_change_pct"].to_numpy(float).copy()
+        y[0] = 0.0                       # step 1 has nothing before it
+        return y
+    return t[f"{q}_strain_pct"].to_numpy(float)
+
+
+def _ylab(yl, kind):
+    return yl.replace("strain", "change from photo before") if kind == "change" else yl
+
+
+def plot_steps(t, out, res, kind="strain"):
     n = len(t)
     fig, axes = plt.subplots(3, 1, figsize=(max(8.5, 1.6 * n + 3), 10), sharex=True)
     x = np.arange(n)
     cols = [colour_for(l) for l in t["label"]]
     for ax, (q, yl) in zip(axes, QTY):
-        y = t[f"{q}_strain_pct"].to_numpy(float)
+        y = _y(t, q, kind)
         ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
         ax.plot(x, y, "-", color="#9a9994", lw=1.6, zorder=2)
         ax.scatter(x, y, c=cols, s=80, edgecolors=SURFACE, linewidths=1.8, zorder=3)
         _label_points(ax, x, y)
-        rl.tidy(ax, None, None, yl)
-        lo, hi = np.nanmin(y), np.nanmax(y)
+        rl.tidy(ax, None, None, _ylab(yl, kind))
+        lo, hi = min(0.0, np.nanmin(y)), max(0.0, np.nanmax(y))
         pad = 0.18 * ((hi - lo) or 1.0)
         ax.set_ylim(lo - pad, hi + pad)
-    axes[0].set_title(f"Strain against the fresh bead at every step  -  "
-                      f"{os.path.basename(res['folder'])}", loc="left", pad=10)
+    axes[0].set_title(f"{TITLES[kind][0]}  -  {os.path.basename(res['folder'])}",
+                      loc="left", pad=10)
     axes[-1].set_xticks(x)
     axes[-1].set_xticklabels(_ticks(t), fontsize=8)
     _legend_conditions(fig, t["label"])
@@ -497,22 +530,21 @@ def plot_changes(t, out, res):
     plt.close(fig)
 
 
-def plot_vs_hours(t, out, res):
+def plot_vs_hours(t, out, res, kind="strain"):
     fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
     x = t["hours"].to_numpy(float)
     cols = [colour_for(l) for l in t["label"]]
     for ax, (q, yl) in zip(axes, QTY):
-        y = t[f"{q}_strain_pct"].to_numpy(float)
+        y = _y(t, q, kind)
         ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
         ax.plot(x, y, "-", color="#9a9994", lw=1.6, zorder=2)
         ax.scatter(x, y, c=cols, s=80, edgecolors=SURFACE, linewidths=1.8, zorder=3)
         _label_points(ax, x, y)
-        lo, hi = np.nanmin(y), np.nanmax(y)
+        lo, hi = min(0.0, np.nanmin(y)), max(0.0, np.nanmax(y))
         pad = 0.18 * ((hi - lo) or 1.0)
         ax.set_ylim(lo - pad, hi + pad)
-        rl.tidy(ax, None, None, yl)
-    axes[0].set_title("Strain against real time (hours since the fresh photo)",
-                      loc="left", pad=10)
+        rl.tidy(ax, None, None, _ylab(yl, kind))
+    axes[0].set_title(TITLES[kind][1], loc="left", pad=10)
     axes[-1].set_xlabel("hours since step 1")
     _legend_conditions(fig, t["label"])
     fig.tight_layout(rect=(0, 0.04, 1, 1))
@@ -520,7 +552,29 @@ def plot_vs_hours(t, out, res):
     plt.close(fig)
 
 
-def plot_timeline(fr, t, out, res):
+def vs_previous(fr):
+    """Frames re-referenced to the photo before each exposure: block 1 to its
+    own first frame, every later block to the END of the block before it
+    (median of its last 3 frames).  Written into the *_strain_pct columns so the timeline
+    plot draws it unchanged."""
+    if fr is None:
+        return None
+    g = fr.copy()
+    for bi in sorted(g["block"].unique()):
+        cur = g["block"] == bi
+        src = g[(g["block"] == (bi - 1 if bi > 1 else bi)) & g["use"]]
+        if not len(src):
+            src = g[g["block"] == (bi - 1 if bi > 1 else bi)]
+        # block 1: its first frame (a fresh bead changes fast, so no averaging);
+        # later blocks: the previous block's settled end, median of 3 frames
+        ref = src.tail(3) if bi > 1 else src.head(1)
+        for col, name in (("V_mm3", "vol"), ("h_um", "height"), ("a_um", "radius")):
+            g.loc[cur, f"{name}_strain_pct"] = 100.0 * (g.loc[cur, col]
+                                                        / float(ref[col].median()) - 1.0)
+    return g
+
+
+def plot_timeline(fr, t, out, res, kind="strain"):
     """Time-lapse: one column per block, width by its length, the gaps between
     them cut out (each gap's length written over the next block)."""
     nb = int(fr["block"].max())
@@ -556,7 +610,7 @@ def plot_timeline(fr, t, out, res):
                             ha="left" if xx == xm[0] else "right", va=va, fontsize=8.5,
                             bbox=dict(boxstyle="round,pad=0.15", fc=SURFACE, ec="none",
                                       alpha=0.85))
-            rl.tidy(ax, None, None, yl if bi == 0 else None)
+            rl.tidy(ax, None, None, _ylab(yl, kind) if bi == 0 else None)
             ax.margins(y=0.14)
             if bi:
                 ax.spines["left"].set_linestyle((0, (3, 3)))
@@ -564,9 +618,11 @@ def plot_timeline(fr, t, out, res):
                 ax.set_title(head, fontsize=9, loc="left")
             if r == 2:
                 ax.set_xlabel("min in this block")
-    fig.suptitle(f"Strain against the fresh bead, block by block  -  "
-                 f"{os.path.basename(res['folder'])}   (gaps between blocks cut out)",
-                 x=0.01, ha="left", fontsize=12)
+    what = ("Strain against the fresh bead, block by block" if kind == "strain" else
+            "Change from the photo before each exposure (block 1: its own start; later blocks: "
+            "the end of the block before)")
+    fig.suptitle(f"{what}  -  {os.path.basename(res['folder'])}   (gaps between blocks cut out)",
+                 x=0.01, ha="left", fontsize=11 if kind == "change" else 12)
     _legend_conditions(fig, t["label"])
     with warnings.catch_warnings():          # shared y across the blocks: harmless
         warnings.simplefilter("ignore")
