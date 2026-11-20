@@ -120,25 +120,53 @@ def find_blocks(photos, gap_min=GAP_MIN):
     return blocks
 
 
+def is_fresh(name):
+    """A photo is the fresh bead only when its name says so: 'fresh' in it, or
+    exactly Image000.  (A set can start after its first exposure.)"""
+    stem = os.path.splitext(os.path.basename(name))[0].strip().lower()
+    return "fresh" in stem or stem == "image000"
+
+
+def _label(p, fallback):
+    if is_fresh(p["name"]):
+        return "fresh"
+    rng = re.search(r"(\d{2,3})\s*-\s*(\d{2,3})\s*%", os.path.splitext(p["name"])[0])
+    if rng:                                   # e.g. dry64-69%
+        return f"after {rng.group(1)}-{rng.group(2)}% RH"
+    return f"after {p['rh']}% RH" if p["rh"] else fallback
+
+
 def default_photo_labels(photos):
-    return ["fresh" if i == 0 else (f"after {p['rh']}% RH" if p["rh"] else f"photo {i + 1}")
-            for i, p in enumerate(photos)]
+    return [_label(p, f"photo {i + 1}") for i, p in enumerate(photos)]
 
 
 def default_block_labels(blocks):
     out = []
     for i, b in enumerate(blocks):
-        rh = next((p["rh"] for p in b[:3] if p["rh"]), None)
-        out.append("fresh" if i == 0 else (f"after {rh}% RH" if rh else f"block {i + 1}"))
+        p = next((q for q in b[:3] if q["rh"] or is_fresh(q["name"])), b[0])
+        out.append(_label(p, f"block {i + 1}"))
     return out
 
 
+def ref_text(t):
+    """What step 1 is, for titles: 'the fresh bead' or 'step 1 (after 68% RH)'."""
+    lab = str(t["label"].iloc[0])
+    return "the fresh bead" if lab.lower().startswith("fresh") else f"step 1 ({lab})"
+
+
+SWELL_RH = 90      # a step at or above this humidity is a swelling step (blue)
+
+
 def colour_for(label):
+    """Blue for a step at high humidity (>= 90 %), orange for a drying one
+    (72 %, 68 %, 64-69 % ...), grey for fresh, green when no humidity is named."""
     s = str(label).lower()
+    if "fresh" in s:
+        return COND["fresh"]
     m = re.search(r"(\d{2,3})\s*%", s)
     if m:
-        return COND.get(m.group(1), COND["other"])
-    return COND["fresh"] if "fresh" in s else COND["other"]
+        return COND["97"] if int(m.group(1)) >= SWELL_RH else COND["72"]
+    return COND["other"]
 
 
 def _clock(p):
@@ -402,7 +430,7 @@ def summary_text(res):
         L += ["", f"  mat edge moves {np.ptp(mats):.0f} px between steps (Y "
               + " / ".join(f"{v:.0f}" for v in mats)
               + ") - each step is measured to its own mat edge."]
-    L += ["", "  plots vs the fresh bead:     strain_steps . strain_vs_time",
+    L += ["", "  plots vs step 1:            strain_steps . strain_vs_time",
           "  plots vs the photo before:   change_steps . change_vs_time . step_changes (bars)",
           "  pictures:                    photo_sheet . outlines",
           f"  saved to {res['outdir']}", ""]
@@ -446,9 +474,9 @@ def _legend_conditions(fig, labels):
         c = colour_for(lab)
         if c in [s[0] for s in seen]:
             continue
-        name = {COND["97"]: "after / at 97 % RH (swelling)",
-                COND["72"]: "after / at 72 % RH (drying)",
-                COND["fresh"]: "fresh bead"}.get(c, "other")
+        name = {COND["97"]: f"after / at >= {SWELL_RH} % RH (swelling)",
+                COND["72"]: f"after / at < {SWELL_RH} % RH (drying)",
+                COND["fresh"]: "fresh bead"}.get(c, "no humidity in the label")
         seen.append((c, name))
         hs.append(Line2D([], [], marker="o", ls="none", mfc=c, mec=SURFACE, ms=9, label=name))
     fig.legend(handles=hs, loc="lower center", ncol=len(hs), frameon=False, fontsize=9)
@@ -489,8 +517,8 @@ def plot_steps(t, out, res, kind="strain"):
         lo, hi = min(0.0, np.nanmin(y)), max(0.0, np.nanmax(y))
         pad = 0.18 * ((hi - lo) or 1.0)
         ax.set_ylim(lo - pad, hi + pad)
-    axes[0].set_title(f"{TITLES[kind][0]}  -  {os.path.basename(res['folder'])}",
-                      loc="left", pad=10)
+    head = TITLES[kind][0].replace("the fresh bead", ref_text(t))
+    axes[0].set_title(f"{head}  -  {os.path.basename(res['folder'])}", loc="left", pad=10)
     axes[-1].set_xticks(x)
     axes[-1].set_xticklabels(_ticks(t), fontsize=8)
     _legend_conditions(fig, t["label"])
@@ -544,7 +572,7 @@ def plot_vs_hours(t, out, res, kind="strain"):
         pad = 0.18 * ((hi - lo) or 1.0)
         ax.set_ylim(lo - pad, hi + pad)
         rl.tidy(ax, None, None, _ylab(yl, kind))
-    axes[0].set_title(TITLES[kind][1], loc="left", pad=10)
+    axes[0].set_title(TITLES[kind][1].replace("the fresh photo", "step 1"), loc="left", pad=10)
     axes[-1].set_xlabel("hours since step 1")
     _legend_conditions(fig, t["label"])
     fig.tight_layout(rect=(0, 0.04, 1, 1))
@@ -618,7 +646,7 @@ def plot_timeline(fr, t, out, res, kind="strain"):
                 ax.set_title(head, fontsize=9, loc="left")
             if r == 2:
                 ax.set_xlabel("min in this block")
-    what = ("Strain against the fresh bead, block by block" if kind == "strain" else
+    what = (f"Strain against {ref_text(t)}, block by block" if kind == "strain" else
             "Change from the photo before each exposure (block 1: its own start; later blocks: "
             "the end of the block before)")
     fig.suptitle(f"{what}  -  {os.path.basename(res['folder'])}   (gaps between blocks cut out)",
