@@ -495,9 +495,11 @@ def _measure_one(path, cfg, want_mask=False):
         mask[rr > yline[None, :]] = 0
         mask[(rr > yline[None, :] - BASE_LINE_BAND_PX) & outside[None, :]] = 0
     mask = pick_blob(mask, cfg["BLOB_CHOICE"])
-    if line:
-        leak_rows = 0            # no mat above a drawn base, so nothing to trim
+    if line and not cfg.get("BASE_LINE_TRIM", True):
+        leak_rows = 0
     else:
+        # with a drawn base too: a line drawn past the bead's corner lets the
+        # blue mat strip beside the base in, and this cuts exactly that shape
         mask, leak_rows = trim_foot_leak(mask)
 
     pr = profile_from_mask(mask)
