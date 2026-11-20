@@ -24,11 +24,13 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cv2                  # noqa: E402
+import numpy as np          # noqa: E402
 import bead_pipeline as bp  # noqa: E402
 import run_local as rl      # noqa: E402
 
 VIEW_W = 560            # on-screen width of each image preview
 VIEW_H = 377
+STRIP_H, STRIP_ZOOM = 96, 2   # the magnified ends of a drawn baseline
 
 
 def _open(path):
@@ -55,6 +57,8 @@ class App:
         self.roi = None
         self.drag0 = None
         self.roi2 = None              # step 3's own crop for the last image
+        self.base = None              # baseline drawn by hand (x0, y0, x1, y1), every frame
+        self.first_full = None        # first image at full size, for the magnified ends
         self.res = None
 
         pad = dict(padx=8, pady=4)
@@ -87,6 +91,31 @@ class App:
             c.bind("<B1-Motion>", lambda ev, w=which: self.drag_move(ev, w))
             c.bind("<ButtonRelease-1>", lambda ev, w=which: self.drag_end(ev, w))
         self.img1 = self.img2 = None
+
+        # ---- baseline drawn by hand (blurred base: blue smear counted as bead)
+        bl = ttk.Frame(root)
+        bl.pack(fill="x", **pad)
+        ttk.Label(bl, text="Baseline (optional) - dragging on the first image draws:").pack(
+            side="left")
+        self.mode = tk.StringVar(value="box")
+        ttk.Radiobutton(bl, text="the crop box", variable=self.mode, value="box").pack(
+            side="left", padx=4)
+        ttk.Radiobutton(bl, text="the baseline (drag along the bead's base)",
+                        variable=self.mode, value="base").pack(side="left")
+        for txt, dl, dr in (("   line ▲", -1, -1), ("▼", 1, 1),
+                            ("   left ▲", -1, 0), ("▼", 1, 0),
+                            ("   right ▲", 0, -1), ("▼", 0, 1)):
+            ttk.Button(bl, text=txt.strip(), width=max(3, len(txt.strip()) + 1),
+                       command=lambda a=dl, b=dr: self.nudge(a, b)).pack(side="left", padx=1)
+        ttk.Button(bl, text="Clear baseline", command=lambda: self.set_base(None)).pack(
+            side="left", padx=(8, 0))
+        self.base_txt = tk.StringVar(value="none - the code finds the mat edge itself")
+        ttk.Label(bl, textvariable=self.base_txt, foreground="#555").pack(side="left", padx=8)
+        self.strip = tk.Canvas(root, width=2 * VIEW_W + 24, height=STRIP_H, bg="#111",
+                               highlightthickness=0)
+        self.strip_pad = pad         # shown only while a baseline is drawn
+        self.strip_img = None
+        self.strip_after = bl
 
         # ---- crop + options
         opt = ttk.Frame(root)
@@ -164,7 +193,7 @@ class App:
         btns.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
         sb = ttk.Scrollbar(rf, orient="vertical")
         sb.pack(side="right", fill="y", pady=4)
-        self.out = tk.Text(rf, height=14, font=("Consolas", 10), wrap="none",
+        self.out = tk.Text(rf, height=7, font=("Consolas", 10), wrap="none",
                            yscrollcommand=sb.set)
         self.out.pack(fill="both", expand=True, padx=4, pady=4)
         sb.config(command=self.out.yview)
@@ -244,6 +273,7 @@ class App:
             return
         H, W = b1.shape[:2]
         self.full = (W, H)
+        self.first_full = b1
         self.scale = min(VIEW_W / W, VIEW_H / H)
         self.img1 = self._photo(b1)
         self.img2 = self._photo(b2)
@@ -262,9 +292,107 @@ class App:
             self.ba.set(len(allp) == 2)
             self.own_crop.set(self.roi2 is not None and not self.ba.get())
             self.set_roi(tuple(per[d]) if d in per else None)
+            bases = self.saved.get("bases", {})
+            self.set_base(tuple(bases[d]) if d in bases else None)
         else:
             self.set_roi(self.roi)
+            self.set_base(self.base)
         self.toggle_ba()
+
+    # ---------------------------------------------------------- baseline
+    def set_base(self, base):
+        """The bead's base, drawn by hand on the first image and used for EVERY
+        frame (a continuous run: the camera and mat do not move)."""
+        self.base = tuple(int(round(v)) for v in base) if base else None
+        for c in (self.c1, self.c2):
+            c.delete("base")
+            if self.base:
+                c.create_line(*(v * self.scale for v in self.base), fill="#ff2d95", width=2,
+                              tags="base")
+        if self.base:
+            x0, y0, x1, y1 = self.base
+            self.base_txt.set(f"drawn: Y {y0} -> {y1}, every frame")
+        else:
+            self.base_txt.set("none - the code finds the mat edge itself")
+        self.draw_strip()
+
+    def nudge(self, dl, dr):
+        if not self.base:
+            self.status.set("Draw a baseline first: choose 'the baseline' and drag along the "
+                            "bead's base on the first image.")
+            return
+        x0, y0, x1, y1 = self.base
+        self.set_base((x0, y0 + dl, x1, y1 + dr))
+
+    def _measure_first(self):
+        """The first image measured the way the run will measure it (box +
+        drawn base), or None."""
+        if not getattr(self, "all_paths", None):
+            return None
+        cfg = dict(bp.DEFAULTS, ROI=self.roi, BASE_LINE=tuple(self.base), MAT_CHROMA_MIN=255,
+                   THRESH_OFFSET=int(float(self.toff.get() or 0)) if self.toff.get().strip()
+                   .lstrip("-").isdigit() else 0)
+        m = bp.measure_one((self.all_paths[0], cfg, True))
+        return m if m.get("ok") else None
+
+    def draw_strip(self):
+        """Where the bead meets the drawn base, magnified: its left and right
+        corners on the first image, with the outline the run will measure."""
+        s = self.strip
+        s.delete("all")
+        if self.base and not s.winfo_ismapped():
+            s.pack(after=self.strip_after, **self.strip_pad)
+            self.out.config(height=4)            # keep the window on the screen
+        elif not self.base and s.winfo_ismapped():
+            s.pack_forget()
+            self.out.config(height=7)
+        if not self.base or self.first_full is None:
+            return
+        bgr = self.first_full
+        H, W = bgr.shape[:2]
+        W2 = int(s.cget("width"))
+        lx0, ly0, lx1, ly1 = self.base
+        slope = (ly1 - ly0) / (lx1 - lx0) if lx1 != lx0 else 0.0
+        m = self._measure_first()
+        if m is not None:              # the bead's own corners: outermost in the bottom band
+            low = m["Y"] >= m["Y"][-1] - bp.BASE_LINE_BAND_PX
+            corners = [(float(m["xl"][low].min()), "LEFT corner"),
+                       (float(m["xr"][low].max()), "RIGHT corner")]
+        else:
+            corners = [(lx0, "LEFT end of line"), (lx1, "RIGHT end of line")]
+        half = W2 // 2
+        ww, wh = int(half / STRIP_ZOOM), int(STRIP_H / STRIP_ZOOM)
+        tiles, marks = [], []
+        for k, (ex, name) in enumerate(corners):
+            ey = ly0 + slope * (ex - lx0)
+            cx0 = int(max(0, min(W - ww, ex - ww // 2)))
+            cy0 = int(max(0, min(H - wh, ey - wh * 0.6)))
+            win = cv2.normalize(bgr[cy0:cy0 + wh, cx0:cx0 + ww], None, 0, 255, cv2.NORM_MINMAX)
+            tile = cv2.resize(win, (half, STRIP_H), interpolation=cv2.INTER_NEAREST)
+            if m is not None:          # the measured outline, in yellow
+                mx0, mx1, my0, my1 = m["roi"]
+                sub = np.zeros((wh, ww), np.uint8)
+                a0, a1 = max(cx0, mx0), min(cx0 + ww, mx1)
+                b0, b1 = max(cy0, my0), min(cy0 + wh, my1)
+                if a1 > a0 and b1 > b0:
+                    sub[b0 - cy0:b1 - cy0, a0 - cx0:a1 - cx0] = \
+                        m["mask"][b0 - my0:b1 - my0, a0 - mx0:a1 - mx0]
+                big = cv2.resize(sub, (half, STRIP_H), interpolation=cv2.INTER_NEAREST)
+                cs, _ = cv2.findContours((big > 0).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                         cv2.CHAIN_APPROX_NONE)
+                cv2.drawContours(tile, cs, -1, (0, 220, 255), 1)
+            tiles.append(tile)
+            marks.append((k * half, (ly0 + slope * (cx0 - lx0) - cy0) * STRIP_ZOOM,
+                          (ly0 + slope * (cx0 + ww - lx0) - cy0) * STRIP_ZOOM, name))
+        ok, png = cv2.imencode(".png", cv2.hconcat(tiles))
+        self.strip_img = self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
+        s.create_image(0, 0, anchor="nw", image=self.strip_img)
+        for off, ya, yb, name in marks:
+            s.create_line(off, ya, off + half, yb, fill="#ff2d95", width=2)
+            s.create_text(off + 6, 4, anchor="nw", fill="#ffcc00",
+                          text=f"{name} of the bead, {STRIP_ZOOM}x   pink = your line, "
+                               "yellow = what will be measured")
+        s.create_line(half, 0, half, STRIP_H, fill="#ffffff")
 
     def toggle_ba(self):
         ba = self.ba.get()
@@ -323,6 +451,8 @@ class App:
         self.roi_txt.set(",".join(str(v) for v in self.roi) if self.roi else "")
         self._box(self.c1, self.roi, "#ff3b30")
         self.redraw_last()
+        if getattr(self, "base", None):
+            self.draw_strip()                    # the corners depend on the box too
 
     def set_roi2(self, roi):
         self.roi2 = tuple(int(v) for v in roi) if roi else None
@@ -373,6 +503,10 @@ class App:
             return
         c = self.c1 if which == 1 else self.c2
         c.delete("drag")
+        if which == 1 and self.mode.get() == "base":
+            c.create_line(*self.drag0, ev.x, ev.y, fill="#ff2d95", width=2, dash=(4, 2),
+                          tags="drag")
+            return
         c.create_rectangle(*self.drag0, ev.x, ev.y, outline="#ffcc00", width=2,
                            dash=(4, 2), tags="drag")
 
@@ -382,6 +516,12 @@ class App:
         (self.c1 if which == 1 else self.c2).delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        if which == 1 and self.mode.get() == "base":
+            (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
+                                             (ev.x / self.scale, ev.y / self.scale)])
+            if px1 - px0 >= 20:
+                self.set_base((px0, py0, px1, py1))
+            return
         x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
         y0, y1 = sorted((ay / self.scale, ev.y / self.scale))
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
@@ -419,6 +559,14 @@ class App:
                    MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"], BASELINE="blue",
                    BASELINE_TUNE=0.0, MAT_MODE="auto", CLIP_AT_BASELINE=True,
                    INTERVAL_S=iv, TIME_REGEX=None)
+        bases = dict(self.saved.get("bases", {}))
+        if self.base:
+            # the floor every frame is measured to; above it the blue smear of a
+            # blurred mat counts as bead (no colour filter)
+            cfg.update(BASE_LINE=tuple(self.base), MAT_CHROMA_MIN=255)
+            bases[d] = list(self.base)
+        else:
+            bases.pop(d, None)
         rois = dict(self.saved.get("rois", {}))
         if self.roi:
             rois[d] = list(self.roi)
@@ -434,7 +582,7 @@ class App:
         else:
             rois_last.pop(d, None)
         self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois, rois_last=rois_last,
-                          thresh_offsets=toffs,
+                          thresh_offsets=toffs, bases=bases,
                           last_is_final=self.last_final.get(),
                           roi=list(self.roi) if self.roi else None)
         rl.save_settings(self.saved)

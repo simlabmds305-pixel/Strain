@@ -1072,6 +1072,7 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
     except Exception:
         res["drying"] = "not judged"
     res["mat_rise"] = info.get("mat_rise")
+    res["base_line"] = cfg.get("BASE_LINE")
     res["series_methods"] = method_table(df, info, cfg["SCALE_PX_PER_UM"])
 
     pair = None
@@ -1094,6 +1095,11 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
             # the last photo gets its own crop; the first keeps the time-lapse's,
             # so it is still the same measurement as step 1's first frame
             cfg_pair["ROI_PER_IMAGE"] = {os.path.basename(last): tuple(pair_roi)}
+            if cfg.get("BASE_LINE"):
+                # a photo taken after the stage moved: the hand-drawn base of the
+                # run does not apply to it, so it finds its own mat edge
+                cfg_pair["PER_IMAGE"] = {os.path.basename(last): dict(
+                    BASE_LINE=None, MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"])}
         try:
             dfp, infop = run_pair((first, last), cfg_pair, pdir, quiet=True, why=why)
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
@@ -1216,7 +1222,12 @@ def results_text(res):
          "",
          "  2. MAT HEIGHT"]
     mr = res["mat_rise"]
-    if mr:
+    bl = res.get("base_line")
+    if bl:
+        L += [f"     not measured - baseline drawn by hand at Y {bl[1]:.0f} -> {bl[3]:.0f}",
+              f"     (x {bl[0]:.0f}-{bl[2]:.0f}), used as the floor for every frame; above it",
+              "     the blurred blue of the mat is counted as bead"]
+    elif mr:
         L += [f"     rise                {mr['rise_px']:+.0f} px = {mr['rise_um']:+,.0f} um",
               f"     mat edge            Y {mr['y_start']:.0f} -> {mr['y_end']:.0f}"
               f"   (highest {mr['max_rise_px']:+.0f} px)",
