@@ -33,6 +33,11 @@ VIEW_W, VIEW_H = 680, 440
 KEY = "humidity"            # this window's part of app_settings.json
 
 
+def _tkey(t):
+    """A photo's identity for remembering its label and box: its capture time."""
+    return t.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _open(path):
     if not os.path.exists(path):
         return
@@ -252,17 +257,24 @@ class App:
         d = self.dkey()
         if saved is None:
             saved = self.mine.get("sets", {}).get(d, {})
-        # keep what was typed this session too
-        labels = dict(saved.get("labels", {}), **{it["name"]: it["label"] for it in self.items})
-        rois = dict(saved.get("rois", {}), **{it["name"]: it["roi"] for it in self.items
-                                               if it.get("roi")})
+        # Remembered per photo by its CAPTURE TIME, which renaming a file cannot
+        # change (keyed by file name, a label stuck to the wrong photo after two
+        # names were swapped).  Only labels typed by hand are remembered; the
+        # rest always come from the current file names.
+        typed = dict(saved.get("labels_typed", {}),
+                     **{_tkey(it["time"]): it["label"] for it in self.items
+                        if it["label"] != it.get("default")})
+        rois = dict(saved.get("rois_t", {}),
+                    **{_tkey(it["time"]): it["roi"] for it in self.items if it.get("roi")})
+        rois_by_name = saved.get("rois", {})          # older saves
         ph = sorted(self.photos_all, key=(lambda p: p["time"]) if self.order.get() == "time"
                     else (lambda p: hu.bp.natural_key(p["path"])))
         clash = hu.order_clash(self.photos_all)
         if self.kind.get() == "photos":
             defaults = hu.default_photo_labels(ph)
             self.items = [dict(paths=[p["path"]], name=p["name"], time=p["time"],
-                               label=labels.get(p["name"], lab), roi=rois.get(p["name"]))
+                               label=typed.get(_tkey(p["time"]), lab), default=lab,
+                               roi=rois.get(_tkey(p["time"])) or rois_by_name.get(p["name"]))
                           for p, lab in zip(ph, defaults)]
             self.cb_last.state(["disabled"])
             self.show_last.set(False)
@@ -275,7 +287,9 @@ class App:
             defaults = hu.default_block_labels(blocks)
             self.items = [dict(paths=[p["path"] for p in b], name=b[0]["name"],
                                time=b[0]["time"], end=b[-1]["time"],
-                               label=labels.get(b[0]["name"], lab), roi=rois.get(b[0]["name"]))
+                               label=typed.get(_tkey(b[0]["time"]), lab), default=lab,
+                               roi=rois.get(_tkey(b[0]["time"]))
+                               or rois_by_name.get(b[0]["name"]))
                           for b, lab in zip(blocks, defaults)]
             self.cb_last.state(["!disabled"])
         n = len(self.photos_all)
@@ -424,13 +438,15 @@ class App:
         d = self.dkey()
         sets = dict(self.mine.get("sets", {}))
         old = sets.get(d, {})
+        here = {_tkey(it["time"]) for it in self.items}
+        typed = {k: v for k, v in old.get("labels_typed", {}).items() if k not in here}
+        typed.update({_tkey(it["time"]): it["label"] for it in self.items
+                      if it["label"] != it.get("default")})
         sets[d] = dict(kind=self.kind.get(), order=self.order.get(), gap=self.gap.get(),
-                       toff=self.toff.get(),
-                       labels=dict(old.get("labels", {}),
-                                   **{it["name"]: it["label"] for it in self.items}),
-                       rois=dict(old.get("rois", {}),
-                                 **{it["name"]: list(it["roi"]) for it in self.items
-                                    if it.get("roi")}))
+                       toff=self.toff.get(), labels_typed=typed,
+                       rois_t=dict(old.get("rois_t", {}),
+                                   **{_tkey(it["time"]): list(it["roi"]) for it in self.items
+                                      if it.get("roi")}))
         self.mine = dict(self.mine, last_dir=d, sets=sets)
         allset = rl.load_settings()
         allset[KEY] = self.mine
