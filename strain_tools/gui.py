@@ -148,6 +148,11 @@ class App:
         self.interval = tk.StringVar(value=str(self.saved.get("interval") or 60))
         ttk.Entry(opt, textvariable=self.interval, width=8).grid(row=1, column=1, sticky="w",
                                                                  padx=6)
+        self.by_time = tk.BooleanVar(value=bool(self.saved.get("order_by_time", True)))
+        ttk.Checkbutton(opt, text="Put the images in the order they were TAKEN, not by file "
+                        "name (for renamed files)", variable=self.by_time,
+                        command=lambda: self.load_folder(keep_roi=True)).grid(
+            row=1, column=3, columnspan=3, sticky="w", padx=(20, 0))
         self.last_final = tk.BooleanVar(value=bool(self.saved.get("last_is_final", True)))
         self.cb_final = ttk.Checkbutton(opt, text="Last image is the final photo (leave it out "
                                         "of the time-lapse)", variable=self.last_final,
@@ -270,6 +275,8 @@ class App:
             self.info.set(f"Not a folder: {d}")
             return
         allp = [p for p in bp.list_frames(d) if os.path.basename(p) not in set(self.skips())]
+        if self.by_time.get():                   # renamed files: the order they were taken
+            allp = bp.sort_by_capture_time(allp)
         if len(allp) < 2:
             self.info.set(f"Only {len(allp)} image(s) in this folder - need at least 2.")
             self.paths = []
@@ -589,7 +596,7 @@ class App:
                    INVERT=False, MANUAL_THRESH=None, THRESH_OFFSET=toff, SEGMENT_METHOD="otsu",
                    MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"], BASELINE="blue",
                    BASELINE_TUNE=0.0, MAT_MODE="auto", CLIP_AT_BASELINE=True,
-                   INTERVAL_S=iv, TIME_REGEX=None)
+                   INTERVAL_S=iv, TIME_REGEX=None, ORDER_BY_TIME=self.by_time.get())
         bases = dict(self.saved.get("bases", {}))
         if self.base:
             # the floor every frame is measured to; above it the blue smear of a
@@ -615,6 +622,7 @@ class App:
         self.saved = dict(self.saved, last_dir=d, interval=iv, rois=rois, rois_last=rois_last,
                           thresh_offsets=toffs, bases=bases,
                           last_is_final=self.last_final.get(),
+                          order_by_time=self.by_time.get(),
                           roi=list(self.roi) if self.roi else None)
         rl.save_settings(self.saved)
 

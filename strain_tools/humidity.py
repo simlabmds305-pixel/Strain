@@ -84,6 +84,26 @@ def name_rh(name):
     return int(m.group(1)) if m else None
 
 
+_MTIME_OK = {}
+
+
+def _fast_time(path, files):
+    """When a photo was taken.  Reading the camera clock out of every TIFF costs
+    ~0.2 s a photo on the pen drive (minutes for a time-lapse folder), so the
+    file's modified time is used when, on a sample of the folder's photos, it
+    agrees with the camera clock to within 2 minutes; otherwise every photo's
+    camera clock is read."""
+    key = tuple(sorted({os.path.dirname(p) for p, _ in files}))
+    if key not in _MTIME_OK:
+        sample = [p for p, _ in files][:: max(1, len(files) // 5)][:6]
+        _MTIME_OK[key] = all(
+            abs((capture_time(p) - dt.datetime.fromtimestamp(os.path.getmtime(p)))
+                .total_seconds()) < 120 for p in sample)
+    if _MTIME_OK[key]:
+        return dt.datetime.fromtimestamp(os.path.getmtime(path))
+    return capture_time(path)
+
+
 def subfolders(folder):
     """Sub-folders holding photos (one level down), not the results folders."""
     out = []
@@ -102,8 +122,9 @@ def list_photos(folder, order="time", subdirs=True):
     natural file-name order ('name').  sub is the sub-folder's name, or ''."""
     dirs = [(folder, "")] + ([(p, os.path.basename(p)) for p in subfolders(folder)]
                              if subdirs else [])
-    out = [dict(path=p, name=os.path.basename(p), time=capture_time(p), rh=name_rh(p), sub=sub)
-           for d, sub in dirs for p in bp.list_frames(d)]
+    files = [(p, sub) for d, sub in dirs for p in bp.list_frames(d)]
+    out = [dict(path=p, name=os.path.basename(p), time=_fast_time(p, files), rh=name_rh(p),
+                sub=sub) for p, sub in files]
     if order == "time":
         out.sort(key=lambda d: d["time"])
     return out
@@ -123,18 +144,21 @@ def order_clash(photos):
 
 
 def find_blocks(photos, gap_min=GAP_MIN):
-    """Split time-ordered photos into recordings at every pause > gap_min, and
-    wherever the sub-folder changes (each sub-folder is its own recording)."""
-    blocks, cur = [], []
-    for p in photos:
-        if cur and ((p["time"] - cur[-1]["time"]).total_seconds() / 60.0 > gap_min
-                    or p.get("sub", "") != cur[-1].get("sub", "")):
+    """Split photos into recordings: each sub-folder's photos on their own,
+    split at every pause > gap_min inside it, the recordings then put in the
+    order they were taken.  (Kept apart per sub-folder, a 'New folder' of single
+    photos taken during a time-lapse cannot cut that time-lapse into pieces.)"""
+    blocks = []
+    for sub in dict.fromkeys(p.get("sub", "") for p in photos):
+        cur = []
+        for p in sorted((q for q in photos if q.get("sub", "") == sub), key=lambda q: q["time"]):
+            if cur and (p["time"] - cur[-1]["time"]).total_seconds() / 60.0 > gap_min:
+                blocks.append(cur)
+                cur = []
+            cur.append(p)
+        if cur:
             blocks.append(cur)
-            cur = []
-        cur.append(p)
-    if cur:
-        blocks.append(cur)
-    return blocks
+    return sorted(blocks, key=lambda b: (b[0]["time"], b[0].get("sub", "")))
 
 
 def is_fresh(name):

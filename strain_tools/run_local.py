@@ -773,22 +773,27 @@ def write_report(df, info, outdir):
 
 
 # ----------------------------------------------------------------------- run
-def series_paths(folder, pattern="*", skip=(), last_is_final=False):
+def series_paths(folder, pattern="*", skip=(), last_is_final=False, by_time=False):
     """(time-lapse images, final photo or None) for one set.
 
     `skip` names files to leave out.  With `last_is_final` the last file is a
     separate final photo (for example taken after pressing the mat flat): it
     is kept out of the time-lapse, where its time would be wrong, and used only
-    for the first + last measurement."""
+    for the first + last measurement.  `by_time` orders the images by when
+    they were taken (camera clock) instead of by file name -- for a set whose
+    files were renamed out of order."""
     skip = {os.path.basename(x) for x in skip}
     paths = [p for p in bp.list_frames(folder, pattern) if os.path.basename(p) not in skip]
+    if by_time:
+        paths = bp.sort_by_capture_time(paths)
     final = paths.pop() if last_is_final and paths else None
     return paths, final
 
 
 def run_folder(folder, cfg, pattern="*", workers=None, quiet=False, out_name="analysis",
                skip=(), last_is_final=False, progress=None):
-    paths, final = series_paths(folder, pattern, skip, last_is_final)
+    paths, final = series_paths(folder, pattern, skip, last_is_final,
+                                by_time=bool(cfg.get("ORDER_BY_TIME")))
     if len(paths) < 2:
         raise SystemExit(f"{folder}: found {len(paths)} image(s); need at least 2")
 

@@ -146,6 +146,33 @@ def list_frames(folder, pattern="*"):
     return sorted(files, key=natural_key)
 
 
+def capture_time(path):
+    """When the photo was taken: the camera's own clock in the TIFF (DateTime,
+    tag 306, or EXIF DateTimeOriginal), else the file's modified time.  A file
+    renamed later keeps this, so it orders a series even when names do not."""
+    import datetime as dt
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            tags = getattr(im, "tag_v2", None) or {}
+            s = tags.get(306) or tags.get(36867)
+            if s:
+                return dt.datetime.strptime(str(s).strip()[:19], "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+    return dt.datetime.fromtimestamp(os.path.getmtime(path))
+
+
+def sort_by_capture_time(paths):
+    """Paths in the order the photos were taken (file name breaks ties).
+
+    Uses the file's modified time: on these cameras it is the moment the photo
+    was saved (within seconds of the TIFF's own clock), renaming or copying a
+    file does not change it, and it is read without opening the file -- the
+    TIFF clock costs ~0.2 s a photo on the pen drive, half a minute a set."""
+    return sorted(paths, key=lambda p: (os.path.getmtime(p), natural_key(p)))
+
+
 def clip01(v):
     return float(np.clip(v, 0.0, 1.0))
 
