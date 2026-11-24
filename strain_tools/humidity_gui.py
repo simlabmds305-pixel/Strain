@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2                  # noqa: E402
 import numpy as np          # noqa: E402
 import humidity as hu       # noqa: E402
+from zoomview import ZoomView  # noqa: E402
 import run_local as rl      # noqa: E402
 
 VIEW_W, VIEW_H = 680, 380
@@ -194,6 +195,10 @@ class App:
         self.cv.bind("<ButtonPress-1>", self.drag_start)
         self.cv.bind("<B1-Motion>", self.drag_move)
         self.cv.bind("<ButtonRelease-1>", self.drag_end)
+        # mouse wheel zooms, right-drag moves, double right-click = whole picture
+        self.view = ZoomView(tk, self.cv, VIEW_W, VIEW_H, on_change=self.draw_overlays)
+        ttk.Label(self.lf, text="Zoom: mouse wheel.  Move: right-click and drag.  Whole "
+                  "picture: double right-click.", foreground="#555").pack(anchor="w", padx=4)
         self.strip = tk.Canvas(self.lf, width=VIEW_W, height=STRIP_H, bg="#111",
                                highlightthickness=0)
         self.strip.pack(padx=4, pady=(0, 4))
@@ -523,29 +528,44 @@ class App:
         return self.cache[path]
 
     def draw_preview(self):
-        self.cv.delete("all")
         if self.sel is None or self.sel >= len(self.items):
+            self.cv.delete("all")
             return
         it = self.items[self.sel]
         last = self.show_last.get() and len(it["paths"]) > 1
         path = it["paths"][-1] if last else it["paths"][0]
-        got = self._image(path)
-        if got is None:
+        bgr = self._full(path)
+        if bgr is None:
+            self.cv.delete("all")
             self.lf.config(text=f"could not read {os.path.basename(path)}")
             return
-        self.photo, self.scale, self.full = got
-        self.cv.create_image(0, 0, anchor="nw", image=self.photo)
+        # the same photo again (a nudge, a new label): keep the zoom where it is
+        self.view.set_image(bgr, keep_view=(path == getattr(self, "shown", None)))
+        self.shown = path
+        self.full = self.view.size()
         self.lf.config(text=f"{self.sel + 1}. {it['label']}  -  {os.path.basename(path)}"
                        + ("  (LAST frame of the block)" if last else "")
                        + {"base": "  -  drag along the bead's BASE",
                           "click": "  -  click ONE point on the mat"}.get(
                            self.mode.get(), "  -  drag a box round the bead"))
-        if it.get("roi"):
-            x0, x1, y0, y1 = (v * self.scale for v in it["roi"])
-            self.cv.create_rectangle(x0, y0, x1, y1, outline="#34c759", width=2, tags="box")
-        if it.get("base"):
-            self.cv.create_line(*(v * self.scale for v in it["base"]), fill="#ff2d95", width=2)
+        self.draw_overlays()
         self.draw_strip(path, it)
+
+    def draw_overlays(self):
+        """Box and baseline in the current zoom (also after every zoom / move)."""
+        self.cv.delete("box")
+        self.cv.delete("base")
+        if self.sel is None or self.sel >= len(self.items):
+            return
+        it, v = self.items[self.sel], self.view
+        if it.get("roi"):
+            r = it["roi"]
+            self.cv.create_rectangle(*v.to_canvas(r[0], r[2]), *v.to_canvas(r[1], r[3]),
+                                     outline="#34c759", width=2, tags="box")
+        if it.get("base"):
+            x0, y0, x1, y1 = it["base"]
+            self.cv.create_line(*v.to_canvas(x0, y0), *v.to_canvas(x1, y1), fill="#ff2d95",
+                                width=2, tags="base")
 
     def drag_start(self, ev):
         self.drag0 = (ev.x, ev.y) if self.sel is not None else None
@@ -566,6 +586,7 @@ class App:
         self.cv.delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        (ax, ay), (bx, by) = self.view.to_full(ax, ay), self.view.to_full(ev.x, ev.y)
         if self.mode.get() == "click":
             it = self.items[self.sel]
             last = self.show_last.get() and len(it["paths"]) > 1
@@ -573,8 +594,7 @@ class App:
             self.root.update_idletasks()
             try:
                 line, how = hu.bp.suggest_base_line(
-                    it["paths"][-1] if last else it["paths"][0], it.get("roi"),
-                    (ev.x / self.scale, ev.y / self.scale))
+                    it["paths"][-1] if last else it["paths"][0], it.get("roi"), (bx, by))
             except Exception as e:
                 self.status.set(f"could not read the photo: {e}")
                 return
@@ -587,16 +607,15 @@ class App:
                             "move it with the arrows")
             return
         if self.mode.get() == "base":
-            (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
-                                             (ev.x / self.scale, ev.y / self.scale)])
+            (px0, py0), (px1, py1) = sorted([(ax, ay), (bx, by)])
             if px1 - px0 < 20:
                 return
             self.items[self.sel]["base"] = (round(px0), round(py0), round(px1), round(py1))
             self.refresh_row(self.sel)
             self.draw_preview()
             return
-        x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
-        y0, y1 = sorted((ay / self.scale, ev.y / self.scale))
+        x0, x1 = sorted((ax, bx))
+        y0, y1 = sorted((ay, by))
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
         x1, y1 = min(W, int(round(x1))), min(H, int(round(y1)))
         if x1 - x0 < 20 or y1 - y0 < 20:

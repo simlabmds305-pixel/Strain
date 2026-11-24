@@ -27,6 +27,7 @@ import cv2                  # noqa: E402
 import numpy as np          # noqa: E402
 import bead_pipeline as bp  # noqa: E402
 import run_local as rl      # noqa: E402
+from zoomview import ZoomView  # noqa: E402
 
 VIEW_W = 560            # on-screen width of each image preview
 VIEW_H = 377
@@ -90,20 +91,26 @@ class App:
             c.bind("<ButtonPress-1>", lambda ev, w=which: self.drag_start(ev, w))
             c.bind("<B1-Motion>", lambda ev, w=which: self.drag_move(ev, w))
             c.bind("<ButtonRelease-1>", lambda ev, w=which: self.drag_end(ev, w))
-        self.img1 = self.img2 = None
-
-        # ---- baseline drawn by hand (blurred base: blue smear counted as bead)
-        bl = ttk.Frame(root)
-        bl.pack(fill="x", **pad)
-        ttk.Label(bl, text="Baseline (optional) - dragging on the first image draws:").pack(
-            side="left")
+        # mouse wheel zooms, right-drag moves, double right-click = whole picture
+        self.v1 = ZoomView(tk, self.c1, VIEW_W, VIEW_H, on_change=self.redraw_overlays)
+        self.v2 = ZoomView(tk, self.c2, VIEW_W, VIEW_H, on_change=self.redraw_overlays)
+        # ---- what the mouse does on the first image, and the baseline
+        bl0 = ttk.Frame(root)
+        bl0.pack(fill="x", padx=8, pady=(2, 0))
+        ttk.Label(bl0, text="On the first image, the left mouse button:").pack(side="left")
         self.mode = tk.StringVar(value="box")
-        ttk.Radiobutton(bl, text="the crop box", variable=self.mode, value="box").pack(
+        ttk.Radiobutton(bl0, text="drags the crop box", variable=self.mode, value="box").pack(
             side="left", padx=4)
-        ttk.Radiobutton(bl, text="the baseline (drag along the base)",
+        ttk.Radiobutton(bl0, text="drags a baseline along the base",
                         variable=self.mode, value="base").pack(side="left")
-        ttk.Radiobutton(bl, text="click ONE point on the mat (the code finds the line)",
+        ttk.Radiobutton(bl0, text="clicks ONE point on the mat (the code finds the baseline)",
                         variable=self.mode, value="click").pack(side="left", padx=4)
+        ttk.Label(bl0, text="   Zoom: mouse wheel.  Move: right-drag.  Whole picture: double "
+                  "right-click.", foreground="#555").pack(side="left")
+        bl = ttk.Frame(root)
+        bl.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Label(bl, text="Baseline (optional, for a base blurred into the mat):").pack(
+            side="left")
         for txt, dl, dr in (("   line ▲", -1, -1), ("▼", 1, 1),
                             ("   left ▲", -1, 0), ("▼", 1, 0),
                             ("   right ▲", 0, -1), ("▼", 0, 1)):
@@ -276,12 +283,8 @@ class App:
         H, W = b1.shape[:2]
         self.full = (W, H)
         self.first_full = b1
-        self.scale = min(VIEW_W / W, VIEW_H / H)
-        self.img1 = self._photo(b1)
-        self.img2 = self._photo(b2)
-        for c, im in ((self.c1, self.img1), (self.c2, self.img2)):
-            c.delete("all")
-            c.create_image(0, 0, anchor="nw", image=im)
+        self.v1.set_image(b1, keep_view=keep_roi)
+        self.v2.set_image(b2, keep_view=keep_roi)
         self.names = (os.path.basename(first), os.path.basename(last))
         if not keep_roi:
             # the crop used last time on THIS folder, if any (the bead is not in
@@ -306,11 +309,7 @@ class App:
         """The bead's base, drawn by hand on the first image and used for EVERY
         frame (a continuous run: the camera and mat do not move)."""
         self.base = tuple(int(round(v)) for v in base) if base else None
-        for c in (self.c1, self.c2):
-            c.delete("base")
-            if self.base:
-                c.create_line(*(v * self.scale for v in self.base), fill="#ff2d95", width=2,
-                              tags="base")
+        self._draw_base_lines()
         if self.base:
             x0, y0, x1, y1 = self.base
             self.base_txt.set(f"drawn: Y {y0} -> {y1}, every frame")
@@ -429,11 +428,23 @@ class App:
         self.info.set(f"{n} images   first: {self.names[0]}   last: {self.names[1]}   "
                       f"-> time-lapse uses {series}{fin}")
 
-    def _photo(self, bgr):
-        small = cv2.resize(bgr, None, fx=self.scale, fy=self.scale,
-                           interpolation=cv2.INTER_AREA)
-        ok, png = cv2.imencode(".png", small)
-        return self.tk.PhotoImage(data=base64.b64encode(png.tobytes()).decode("ascii"))
+    def _view(self, c):
+        return self.v1 if c is self.c1 else self.v2
+
+    def _draw_base_lines(self):
+        for c in (self.c1, self.c2):
+            c.delete("base")
+            if self.base:
+                v = self._view(c)
+                x0, y0, x1, y1 = self.base
+                c.create_line(*v.to_canvas(x0, y0), *v.to_canvas(x1, y1), fill="#ff2d95",
+                              width=2, tags="base")
+
+    def redraw_overlays(self):
+        """After a zoom or a move: the box(es) and the baseline, in the new view."""
+        self._box(self.c1, self.roi, "#ff3b30")
+        self.redraw_last()
+        self._draw_base_lines()
 
     # -------------------------------------------------------------- crop
     LF1_SERIES = "First image - drag a box round the bead"
@@ -445,7 +456,8 @@ class App:
     def _box(self, c, roi, colour):
         c.delete("box")
         if roi:
-            x0, x1, y0, y1 = (v * self.scale for v in roi)
+            v = self._view(c)
+            (x0, y0), (x1, y1) = v.to_canvas(roi[0], roi[2]), v.to_canvas(roi[1], roi[3])
             c.create_rectangle(x0, y0, x1, y1, outline=colour, width=2, tags="box")
 
     def set_roi(self, roi):
@@ -520,12 +532,13 @@ class App:
         (self.c1 if which == 1 else self.c2).delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        v = self.v1 if which == 1 else self.v2
+        (ax, ay), (bx, by) = v.to_full(ax, ay), v.to_full(ev.x, ev.y)   # image px
         if which == 1 and self.mode.get() == "click":
             self.status.set("finding the mat edge near your click...")
             self.root.update_idletasks()
             try:
-                line, how = bp.suggest_base_line(self.all_paths[0], self.roi,
-                                                 (ev.x / self.scale, ev.y / self.scale))
+                line, how = bp.suggest_base_line(self.all_paths[0], self.roi, (bx, by))
             except Exception as e:
                 self.status.set(f"could not read the first image: {e}")
                 return
@@ -536,13 +549,12 @@ class App:
                             "move it with the arrows")
             return
         if which == 1 and self.mode.get() == "base":
-            (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
-                                             (ev.x / self.scale, ev.y / self.scale)])
+            (px0, py0), (px1, py1) = sorted([(ax, ay), (bx, by)])
             if px1 - px0 >= 20:
                 self.set_base((px0, py0, px1, py1))
             return
-        x0, x1 = sorted((ax / self.scale, ev.x / self.scale))
-        y0, y1 = sorted((ay / self.scale, ev.y / self.scale))
+        x0, x1 = sorted((ax, bx))
+        y0, y1 = sorted((ay, by))
         x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
         x1, y1 = min(W, int(round(x1))), min(H, int(round(y1)))
         if x1 - x0 >= 20 and y1 - y0 >= 20:
