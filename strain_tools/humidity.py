@@ -84,11 +84,26 @@ def name_rh(name):
     return int(m.group(1)) if m else None
 
 
-def list_photos(folder, order="time"):
-    """Every image in the folder as dicts (path, name, time, rh), in capture-time
-    order ('time') or natural file-name order ('name')."""
-    out = [dict(path=p, name=os.path.basename(p), time=capture_time(p),
-                rh=name_rh(p)) for p in bp.list_frames(folder)]
+def subfolders(folder):
+    """Sub-folders holding photos (one level down), not the results folders."""
+    out = []
+    for d in sorted(os.listdir(folder), key=lambda s: bp.natural_key(s)):
+        p = os.path.join(folder, d)
+        if os.path.isdir(p) and not d.lower().startswith(("analysis", OUT_NAME)) \
+                and bp.list_frames(p):
+            out.append(p)
+    return out
+
+
+def list_photos(folder, order="time", subdirs=True):
+    """Every image in the folder -- and, with subdirs, in its sub-folders one
+    level down (a time-lapse split into 'timelapse 1', 'timelapse 2' ...) -- as
+    dicts (path, name, time, rh, sub), in capture-time order ('time') or
+    natural file-name order ('name').  sub is the sub-folder's name, or ''."""
+    dirs = [(folder, "")] + ([(p, os.path.basename(p)) for p in subfolders(folder)]
+                             if subdirs else [])
+    out = [dict(path=p, name=os.path.basename(p), time=capture_time(p), rh=name_rh(p), sub=sub)
+           for d, sub in dirs for p in bp.list_frames(d)]
     if order == "time":
         out.sort(key=lambda d: d["time"])
     return out
@@ -108,10 +123,12 @@ def order_clash(photos):
 
 
 def find_blocks(photos, gap_min=GAP_MIN):
-    """Split time-ordered photos into recordings at every pause > gap_min."""
+    """Split time-ordered photos into recordings at every pause > gap_min, and
+    wherever the sub-folder changes (each sub-folder is its own recording)."""
     blocks, cur = [], []
     for p in photos:
-        if cur and (p["time"] - cur[-1]["time"]).total_seconds() / 60.0 > gap_min:
+        if cur and ((p["time"] - cur[-1]["time"]).total_seconds() / 60.0 > gap_min
+                    or p.get("sub", "") != cur[-1].get("sub", "")):
             blocks.append(cur)
             cur = []
         cur.append(p)
@@ -144,7 +161,10 @@ def default_block_labels(blocks):
     out = []
     for i, b in enumerate(blocks):
         p = next((q for q in b[:3] if q["rh"] or is_fresh(q["name"])), b[0])
-        out.append(_label(p, f"block {i + 1}"))
+        sub = b[0].get("sub", "")
+        if sub and any(x is not b and x[0].get("sub") == sub for x in blocks):
+            sub = f"{sub} (part {sum(1 for x in blocks[:i + 1] if x[0].get('sub') == sub)})"
+        out.append(_label(p, sub or f"block {i + 1}"))
     return out
 
 

@@ -295,7 +295,8 @@ class App:
             self.fill_tree()
             return
         saved = self.mine.get("sets", {}).get(d, {})
-        self.kind.set(saved.get("kind") or ("timelapse" if len(self.photos_all) >= 20
+        has_subs = any(p.get("sub") for p in self.photos_all)
+        self.kind.set(saved.get("kind") or ("timelapse" if has_subs or len(self.photos_all) >= 20
                                             else "photos"))
         self.order.set(saved.get("order", "time"))
         self.gap.set(str(saved.get("gap", 10)))
@@ -342,7 +343,7 @@ class App:
             blocks = hu.find_blocks(sorted(self.photos_all, key=lambda p: p["time"]), gap)
             defaults = hu.default_block_labels(blocks)
             self.items = [dict(paths=[p["path"] for p in b], name=b[0]["name"],
-                               time=b[0]["time"], end=b[-1]["time"],
+                               time=b[0]["time"], end=b[-1]["time"], sub=b[0].get("sub", ""),
                                label=typed.get(_tkey(b[0]["time"]), lab), default=lab,
                                roi=rois.get(_tkey(b[0]["time"]))
                                or rois_by_name.get(b[0]["name"]),
@@ -374,9 +375,11 @@ class App:
         self.tree.delete(*self.tree.get_children())
         for i, it in enumerate(self.items):
             if len(it["paths"]) == 1:
-                files, taken = it["name"], it["time"].strftime("%d-%m %H:%M")
+                files = f"{it['name']}  ({it['sub']})" if it.get("sub") else it["name"]
+                taken = it["time"].strftime("%d-%m %H:%M")
             else:
-                files = f"{len(it['paths'])} frames from {it['name']}"
+                files = (f"{len(it['paths'])} frames in {it['sub']}" if it.get("sub")
+                         else f"{len(it['paths'])} frames from {it['name']}")
                 mins = (it["end"] - it["time"]).total_seconds() / 60
                 taken = f"{it['time'].strftime('%d-%m %H:%M')} +{mins:.0f}m"
             self.tree.insert("", "end", iid=str(i), values=(
