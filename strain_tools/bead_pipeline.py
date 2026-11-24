@@ -404,6 +404,32 @@ def mat_edge_under_bead(sat, prof, fit, y_band, chroma_step=25, band=80):
 
 
 # ----------------------------------------------------------- STAGE 1: per image
+def suggest_base_line(path, roi, click, cfg=None, near_px=40):
+    """A baseline from ONE click on the mat: the mat's edge found from its blue
+    colour (tilt from the mat either side of the bead, height where the bead
+    sits), drawn across the box.  Returns ((x0, y0, x1, y1), how) where how is
+    'found' or, when no edge lies within near_px of the click, 'flat' -- a level
+    line through the click itself."""
+    cfg = dict(DEFAULTS, **(cfg or {}))
+    for k in ("BASE_LINE", "PER_IMAGE"):
+        cfg.pop(k, None)
+    cfg.update(ROI=tuple(roi) if roi else None, BASELINE="blue",
+               MAT_CHROMA_MIN=DEFAULTS["MAT_CHROMA_MIN"])
+    m = measure_one((path, cfg, False))
+    cx, cy = float(click[0]), float(click[1])
+    if roi:
+        x0, x1 = float(roi[0]), float(roi[1])
+    else:
+        x0, x1 = 0.0, float(m.get("frame_w", cx * 2))
+    if m.get("ok") and m.get("mat_fit") and m.get("mat_y") is not None:
+        slope = float(m["mat_fit"][0])
+        xc = float((m["xl"].min() + m["xr"].max()) / 2.0)
+        icpt = float(m["mat_y"]) - slope * xc        # through the edge under the bead
+        if abs(slope * cx + icpt - cy) <= near_px:
+            return (x0, slope * x0 + icpt, x1, slope * x1 + icpt), "found"
+    return (x0, cy, x1, cy), "flat"
+
+
 def measure_one(args):
     """Segment one image and return everything later stages need.
 

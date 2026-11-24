@@ -26,6 +26,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cv2                  # noqa: E402
+import numpy as np          # noqa: E402
 import humidity as hu       # noqa: E402
 import run_local as rl      # noqa: E402
 
@@ -162,6 +163,12 @@ class App:
             side="left", padx=4)
         ttk.Radiobutton(mr, text="the baseline (drag along the base)", variable=self.mode,
                         value="base", command=self.draw_preview).pack(side="left")
+        mr2 = ttk.Frame(bl)
+        mr2.pack(fill="x", padx=4)
+        ttk.Label(mr2, text="Clicking on the picture:").pack(side="left")
+        ttk.Radiobutton(mr2, text="ONE point on the mat - the code finds the line",
+                        variable=self.mode, value="click",
+                        command=self.draw_preview).pack(side="left", padx=4)
         nr = ttk.Frame(bl)
         nr.pack(fill="x", padx=4, pady=2)
         for txt, dl, dr in (("whole line ▲", -1, -1), ("▼", 1, 1),
@@ -450,15 +457,38 @@ class App:
         H, W = bgr.shape[:2]
         lx0, ly0, lx1, ly1 = base
         slope = (ly1 - ly0) / (lx1 - lx0) if lx1 != lx0 else 0.0
+        # the bead's own corners on the line, measured as the run will measure it
+        m = hu.bp.measure_one((path, dict(hu.bp.DEFAULTS, ROI=it.get("roi"),
+                                          **hu.base_override(base)), True))
+        if m.get("ok"):
+            low = m["Y"] >= m["Y"][-1] - hu.bp.BASE_LINE_BAND_PX
+            ends = [float(m["xl"][low].min()), float(m["xr"][low].max())]
+            names = ("LEFT corner (yellow = measured, pink = line)", "RIGHT corner")
+        else:
+            m, ends, names = None, [lx0, lx1], ("LEFT end of the line", "RIGHT end of the line")
         half = VIEW_W // 2
         ww, wh = int(half / STRIP_ZOOM), int(STRIP_H / STRIP_ZOOM)   # image px per panel
         panels = []
-        for k, (ex, ey) in enumerate(((lx0, ly0), (lx1, ly1))):
+        for k, ex in enumerate(ends):
+            ey = ly0 + slope * (ex - lx0)
             cx0 = int(max(0, min(W - ww, ex - ww // 2)))
             cy0 = int(max(0, min(H - wh, ey - wh * 0.6)))
             win = cv2.normalize(bgr[cy0:cy0 + wh, cx0:cx0 + ww], None, 0, 255,
                                 cv2.NORM_MINMAX)          # stretch: the blur is low-contrast
-            panels.append(cv2.resize(win, (half, STRIP_H), interpolation=cv2.INTER_NEAREST))
+            tile = cv2.resize(win, (half, STRIP_H), interpolation=cv2.INTER_NEAREST)
+            if m is not None:                             # the measured outline, yellow
+                mx0, mx1, my0, my1 = m["roi"]
+                sub = np.zeros((wh, ww), np.uint8)
+                a0, a1 = max(cx0, mx0), min(cx0 + ww, mx1)
+                b0, b1 = max(cy0, my0), min(cy0 + wh, my1)
+                if a1 > a0 and b1 > b0:
+                    sub[b0 - cy0:b1 - cy0, a0 - cx0:a1 - cx0] = \
+                        m["mask"][b0 - my0:b1 - my0, a0 - mx0:a1 - mx0]
+                big = cv2.resize(sub, (half, STRIP_H), interpolation=cv2.INTER_NEAREST)
+                cs, _ = cv2.findContours((big > 0).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                         cv2.CHAIN_APPROX_NONE)
+                cv2.drawContours(tile, cs, -1, (0, 220, 255), 1)
+            panels.append(tile)
             # where the line runs through this panel
             ya = (ly0 + slope * (cx0 - lx0) - cy0) * STRIP_ZOOM
             yb = (ly0 + slope * (cx0 + ww - lx0) - cy0) * STRIP_ZOOM
@@ -472,10 +502,9 @@ class App:
             self.strip.create_line(off, ya, off + half, yb, fill="#ff2d95", width=2)
             self.strip.create_oval(ex - 4, ey - 4, ex + 4, ey + 4, outline="#ffcc00", width=2)
         self.strip.create_line(half, 0, half, STRIP_H, fill="#ffffff")
-        self.strip.create_text(6, 4, anchor="nw", fill="#ffcc00", text=(
-            f"LEFT end, {STRIP_ZOOM}x   (line Y {ly0:.0f})"))
-        self.strip.create_text(half + 6, 4, anchor="nw", fill="#ffcc00", text=(
-            f"RIGHT end, {STRIP_ZOOM}x   (line Y {ly1:.0f})"))
+        for k, name in enumerate(names):
+            self.strip.create_text(k * half + 6, 4, anchor="nw", fill="#ffcc00",
+                                   text=f"{name}, {STRIP_ZOOM}x")
 
     # ------------------------------------------------------------ picture
     def _image(self, path):
@@ -508,8 +537,9 @@ class App:
         self.cv.create_image(0, 0, anchor="nw", image=self.photo)
         self.lf.config(text=f"{self.sel + 1}. {it['label']}  -  {os.path.basename(path)}"
                        + ("  (LAST frame of the block)" if last else "")
-                       + ("  -  drag along the bead's BASE" if self.mode.get() == "base"
-                          else "  -  drag a box round the bead"))
+                       + {"base": "  -  drag along the bead's BASE",
+                          "click": "  -  click ONE point on the mat"}.get(
+                           self.mode.get(), "  -  drag a box round the bead"))
         if it.get("roi"):
             x0, x1, y0, y1 = (v * self.scale for v in it["roi"])
             self.cv.create_rectangle(x0, y0, x1, y1, outline="#34c759", width=2, tags="box")
@@ -521,7 +551,7 @@ class App:
         self.drag0 = (ev.x, ev.y) if self.sel is not None else None
 
     def drag_move(self, ev):
-        if self.drag0:
+        if self.drag0 and self.mode.get() != "click":
             self.cv.delete("drag")
             if self.mode.get() == "base":
                 self.cv.create_line(*self.drag0, ev.x, ev.y, fill="#ff2d95", width=2,
@@ -536,6 +566,26 @@ class App:
         self.cv.delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        if self.mode.get() == "click":
+            it = self.items[self.sel]
+            last = self.show_last.get() and len(it["paths"]) > 1
+            self.status.set("finding the mat edge near your click...")
+            self.root.update_idletasks()
+            try:
+                line, how = hu.bp.suggest_base_line(
+                    it["paths"][-1] if last else it["paths"][0], it.get("roi"),
+                    (ev.x / self.scale, ev.y / self.scale))
+            except Exception as e:
+                self.status.set(f"could not read the photo: {e}")
+                return
+            it["base"] = tuple(round(v) for v in line)
+            self.refresh_row(self.sel)
+            self.draw_preview()
+            self.status.set("baseline found from the mat's colour - check the magnified ends"
+                            if how == "found" else
+                            "no mat edge found near your click - drew a level line through it; "
+                            "move it with the arrows")
+            return
         if self.mode.get() == "base":
             (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
                                              (ev.x / self.scale, ev.y / self.scale)])

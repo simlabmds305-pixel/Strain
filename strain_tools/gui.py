@@ -100,8 +100,10 @@ class App:
         self.mode = tk.StringVar(value="box")
         ttk.Radiobutton(bl, text="the crop box", variable=self.mode, value="box").pack(
             side="left", padx=4)
-        ttk.Radiobutton(bl, text="the baseline (drag along the bead's base)",
+        ttk.Radiobutton(bl, text="the baseline (drag along the base)",
                         variable=self.mode, value="base").pack(side="left")
+        ttk.Radiobutton(bl, text="click ONE point on the mat (the code finds the line)",
+                        variable=self.mode, value="click").pack(side="left", padx=4)
         for txt, dl, dr in (("   line ▲", -1, -1), ("▼", 1, 1),
                             ("   left ▲", -1, 0), ("▼", 1, 0),
                             ("   right ▲", 0, -1), ("▼", 0, 1)):
@@ -390,7 +392,7 @@ class App:
         for off, ya, yb, name in marks:
             s.create_line(off, ya, off + half, yb, fill="#ff2d95", width=2)
             s.create_text(off + 6, 4, anchor="nw", fill="#ffcc00",
-                          text=f"{name} of the bead, {STRIP_ZOOM}x   pink = your line, "
+                          text=f"{name} of the bead, {STRIP_ZOOM}x   pink = the line, "
                                "yellow = what will be measured")
         s.create_line(half, 0, half, STRIP_H, fill="#ffffff")
 
@@ -503,6 +505,8 @@ class App:
             return
         c = self.c1 if which == 1 else self.c2
         c.delete("drag")
+        if which == 1 and self.mode.get() == "click":
+            return
         if which == 1 and self.mode.get() == "base":
             c.create_line(*self.drag0, ev.x, ev.y, fill="#ff2d95", width=2, dash=(4, 2),
                           tags="drag")
@@ -516,6 +520,21 @@ class App:
         (self.c1 if which == 1 else self.c2).delete("drag")
         (ax, ay), self.drag0 = self.drag0, None
         W, H = self.full
+        if which == 1 and self.mode.get() == "click":
+            self.status.set("finding the mat edge near your click...")
+            self.root.update_idletasks()
+            try:
+                line, how = bp.suggest_base_line(self.all_paths[0], self.roi,
+                                                 (ev.x / self.scale, ev.y / self.scale))
+            except Exception as e:
+                self.status.set(f"could not read the first image: {e}")
+                return
+            self.set_base(line)
+            self.status.set("baseline found from the mat's colour - check the corners below"
+                            if how == "found" else
+                            "no mat edge found near your click - drew a level line through it; "
+                            "move it with the arrows")
+            return
         if which == 1 and self.mode.get() == "base":
             (px0, py0), (px1, py1) = sorted([(ax / self.scale, ay / self.scale),
                                              (ev.x / self.scale, ev.y / self.scale)])
