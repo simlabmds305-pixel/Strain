@@ -3,8 +3,7 @@
 #  HUMIDITY CYCLES  |  window
 #
 #  For the humidity sets: a bead photographed fresh, then after 72 % RH, after
-#  97 % RH, ... (BEFORE / AFTER PHOTOS), or one folder of time-lapse
-#  recordings separated by the exposures (TIME-LAPSE BLOCKS).
+#  97 % RH, ...  Before / after PHOTOS only; time-lapses go in Bead Shrinkage.
 #
 #  Choose the folder, check the list (it is in the order the photos were TAKEN,
 #  from the camera's clock), give every step a label, drag a box round the bead
@@ -60,7 +59,7 @@ class App:
         root.minsize(1200, 820)
         self.q = queue.Queue()
         self.busy = False
-        self.items = []             # dict(paths, name, time, label, roi)
+        self.items = []             # dict(path, name, time, label, roi, base)
         self.sel = None             # index of the selected item
         self.scale = 1.0
         self.full = (0, 0)
@@ -82,17 +81,9 @@ class App:
         e.bind("<Return>", lambda _e: self.load_folder())
         ttk.Button(top, text="Browse...", command=self.browse).pack(side="left")
 
-        # ---- kind, order, options
+        # ---- order, options
         opt = ttk.Frame(root)
         opt.pack(fill="x", **pad)
-        ttk.Label(opt, text="This folder is:").grid(row=0, column=0, sticky="w")
-        self.kind = tk.StringVar(value="photos")
-        ttk.Radiobutton(opt, text="Before / after photos (one photo per step)",
-                        variable=self.kind, value="photos",
-                        command=self.rebuild).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Radiobutton(opt, text="Time-lapse blocks (recordings split by the gaps)",
-                        variable=self.kind, value="timelapse",
-                        command=self.rebuild).grid(row=0, column=2, sticky="w", padx=4)
         ttk.Label(opt, text="Order:").grid(row=1, column=0, sticky="w")
         self.order = tk.StringVar(value="time")
         ttk.Radiobutton(opt, text="when each photo was taken (camera clock)",
@@ -100,13 +91,6 @@ class App:
                         command=self.rebuild).grid(row=1, column=1, sticky="w", padx=4)
         ttk.Radiobutton(opt, text="file name", variable=self.order, value="name",
                         command=self.rebuild).grid(row=1, column=2, sticky="w", padx=4)
-        ttk.Label(opt, text="New block after a pause of (min):").grid(row=0, column=3,
-                                                                      sticky="e", padx=(24, 4))
-        self.gap = tk.StringVar(value="10")
-        ge = ttk.Entry(opt, textvariable=self.gap, width=6)
-        ge.grid(row=0, column=4, sticky="w")
-        ge.bind("<Return>", lambda _e: self.rebuild())
-        ge.bind("<FocusOut>", lambda _e: self.rebuild())
         ttk.Label(opt, text="Threshold offset:").grid(row=1, column=3, sticky="e", padx=(24, 4))
         self.toff = tk.StringVar(value="0")
         ttk.Entry(opt, textvariable=self.toff, width=6).grid(row=1, column=4, sticky="w")
@@ -127,7 +111,7 @@ class App:
         cols = ("n", "label", "files", "taken", "box", "base")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", height=10,
                                  selectmode="browse")
-        for c, w, t in (("n", 34, "#"), ("label", 160, "label"), ("files", 250, "photo(s)"),
+        for c, w, t in (("n", 34, "#"), ("label", 160, "label"), ("files", 250, "photo"),
                         ("taken", 140, "taken"), ("box", 44, "box"), ("base", 70, "baseline")):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w" if c not in ("box", "base") else "center")
@@ -204,12 +188,6 @@ class App:
         self.strip.pack(padx=4, pady=(0, 4))
         self.strip_img = None
         self.full_img = (None, None)          # (path, full-resolution BGR) of the preview
-        self.show_last = tk.BooleanVar(value=False)
-        self.cb_last = ttk.Checkbutton(right, text="show this block's LAST frame (check the bead "
-                                       "stays inside the box)", variable=self.show_last,
-                                       command=self.draw_preview)
-        self.cb_last.pack(anchor="w")
-
         # ---- run
         run = ttk.Frame(root)
         run.pack(fill="x", **pad)
@@ -289,23 +267,28 @@ class App:
         self.photos_all = hu.list_photos(d, "time")
         self.cache.clear()
         self.items, self.sel = [], None      # another folder's labels must not carry over
-        if len(self.photos_all) < 2:
-            self.info.set(f"{len(self.photos_all)} image(s) here - need at least 2.")
-            self.items = []
+        n = len(self.photos_all)
+        if n < 2 or n > hu.MAX_PHOTOS:
+            self.photos_all = []
             self.fill_tree()
+            self.cv.delete("all")
+            self.status.set("")
+            self.info.set(f"{n} photo(s) directly in this folder.")
+            self.warn.set(
+                f"{n} photos is a time-lapse. This window is for before / after photos only - "
+                "run time-lapses in Bead Shrinkage." if n > hu.MAX_PHOTOS else
+                "Need at least 2 photos." if n else
+                "Sub-folders are not read. Choose the folder that holds the before / after "
+                "photos themselves; run time-lapses in Bead Shrinkage.")
             return
         saved = self.mine.get("sets", {}).get(d, {})
-        has_subs = any(p.get("sub") for p in self.photos_all)
-        self.kind.set(saved.get("kind") or ("timelapse" if has_subs or len(self.photos_all) >= 20
-                                            else "photos"))
         self.order.set(saved.get("order", "time"))
-        self.gap.set(str(saved.get("gap", 10)))
         self.toff.set(str(saved.get("toff", 0)))
         self.status.set("")
         self.rebuild(saved)
 
     def rebuild(self, saved=None):
-        """Make the list of steps (photos or blocks) from the photos."""
+        """Make the list of steps, one per photo."""
         if not getattr(self, "photos_all", None):
             return
         d = self.dkey()
@@ -326,46 +309,24 @@ class App:
         ph = sorted(self.photos_all, key=(lambda p: p["time"]) if self.order.get() == "time"
                     else (lambda p: hu.bp.natural_key(p["path"])))
         clash = hu.order_clash(self.photos_all)
-        if self.kind.get() == "photos":
-            defaults = hu.default_photo_labels(ph)
-            self.items = [dict(paths=[p["path"]], name=p["name"], time=p["time"],
-                               label=typed.get(_tkey(p["time"]), lab), default=lab,
-                               roi=rois.get(_tkey(p["time"])) or rois_by_name.get(p["name"]),
-                               base=bases.get(_tkey(p["time"])))
-                          for p, lab in zip(ph, defaults)]
-            self.cb_last.state(["disabled"])
-            self.show_last.set(False)
-        else:
-            try:
-                gap = float(self.gap.get())
-            except ValueError:
-                gap = hu.GAP_MIN
-            blocks = hu.find_blocks(sorted(self.photos_all, key=lambda p: p["time"]), gap)
-            defaults = hu.default_block_labels(blocks)
-            self.items = [dict(paths=[p["path"] for p in b], name=b[0]["name"],
-                               time=b[0]["time"], end=b[-1]["time"], sub=b[0].get("sub", ""),
-                               label=typed.get(_tkey(b[0]["time"]), lab), default=lab,
-                               roi=rois.get(_tkey(b[0]["time"]))
-                               or rois_by_name.get(b[0]["name"]),
-                               base=bases.get(_tkey(b[0]["time"])))
-                          for b, lab in zip(blocks, defaults)]
-            self.cb_last.state(["!disabled"])
+        defaults = hu.default_photo_labels(ph)
+
+        def kept(m, p):
+            # remembered under the camera's clock; a few sets saved on 24-25 Nov
+            # 2026 are under the file's own time instead
+            return m.get(_tkey(p["time"])) or m.get(_tkey(p["file_time"]))
+        self.items = [dict(path=p["path"], name=p["name"], time=p["time"],
+                           label=kept(typed, p) or lab, default=lab,
+                           roi=kept(rois, p) or rois_by_name.get(p["name"]),
+                           base=kept(bases, p))
+                      for p, lab in zip(ph, defaults)]
         n = len(self.photos_all)
-        if self.kind.get() == "photos":
-            self.info.set(f"{n} photos -> {len(self.items)} steps.  Select each step, check its "
-                          "label, drag a box round the bead.  (A box drawn also fills any step "
-                          "that has none yet.)")
-        else:
-            self.info.set(f"{n} frames -> {len(self.items)} recordings (a new one after every "
-                          f"pause longer than {self.gap.get()} min).  Label each block and draw "
-                          "its box; tick 'last frame' to check the bead stays inside.")
+        self.info.set(f"{n} photos -> {n} steps.  Select each step, check its label, drag a box "
+                      "round the bead.  (A box drawn also fills any step that has none yet.)")
         warn = ""
-        if clash and self.kind.get() == "photos":
+        if clash:
             warn = (clash + "\nThe list follows the camera clock. If a label in a file name is "
                     "on the wrong photo, fix the label here (the file is not renamed).")
-        if self.kind.get() == "photos" and n > 20:
-            warn += ("\n" if warn else "") + (f"{n} photos as single steps - is this really a "
-                                              "time-lapse? Choose 'Time-lapse blocks'.")
         self.warn.set(warn)
         self.fill_tree()
         if self.items:
@@ -374,14 +335,7 @@ class App:
     def fill_tree(self):
         self.tree.delete(*self.tree.get_children())
         for i, it in enumerate(self.items):
-            if len(it["paths"]) == 1:
-                files = f"{it['name']}  ({it['sub']})" if it.get("sub") else it["name"]
-                taken = it["time"].strftime("%d-%m %H:%M")
-            else:
-                files = (f"{len(it['paths'])} frames in {it['sub']}" if it.get("sub")
-                         else f"{len(it['paths'])} frames from {it['name']}")
-                mins = (it["end"] - it["time"]).total_seconds() / 60
-                taken = f"{it['time'].strftime('%d-%m %H:%M')} +{mins:.0f}m"
+            files, taken = it["name"], it["time"].strftime("%d-%m %H:%M")
             self.tree.insert("", "end", iid=str(i), values=(
                 i + 1, it["label"], files, taken, "yes" if it.get("roi") else "-",
                 "drawn" if it.get("base") else "-"))
@@ -535,8 +489,7 @@ class App:
             self.cv.delete("all")
             return
         it = self.items[self.sel]
-        last = self.show_last.get() and len(it["paths"]) > 1
-        path = it["paths"][-1] if last else it["paths"][0]
+        path = it["path"]
         bgr = self._full(path)
         if bgr is None:
             self.cv.delete("all")
@@ -547,7 +500,6 @@ class App:
         self.shown = path
         self.full = self.view.size()
         self.lf.config(text=f"{self.sel + 1}. {it['label']}  -  {os.path.basename(path)}"
-                       + ("  (LAST frame of the block)" if last else "")
                        + {"base": "  -  drag along the bead's BASE",
                           "click": "  -  click ONE point on the mat"}.get(
                            self.mode.get(), "  -  drag a box round the bead"))
@@ -592,12 +544,11 @@ class App:
         (ax, ay), (bx, by) = self.view.to_full(ax, ay), self.view.to_full(ev.x, ev.y)
         if self.mode.get() == "click":
             it = self.items[self.sel]
-            last = self.show_last.get() and len(it["paths"]) > 1
             self.status.set("finding the mat edge near your click...")
             self.root.update_idletasks()
             try:
                 line, how = hu.bp.suggest_base_line(
-                    it["paths"][-1] if last else it["paths"][0], it.get("roi"), (bx, by))
+                    it["path"], it.get("roi"), (bx, by))
             except Exception as e:
                 self.status.set(f"could not read the photo: {e}")
                 return
@@ -641,7 +592,7 @@ class App:
         typed = {k: v for k, v in old.get("labels_typed", {}).items() if k not in here}
         typed.update({_tkey(it["time"]): it["label"] for it in self.items
                       if it["label"] != it.get("default")})
-        sets[d] = dict(kind=self.kind.get(), order=self.order.get(), gap=self.gap.get(),
+        sets[d] = dict(order=self.order.get(),
                        toff=self.toff.get(), labels_typed=typed,
                        rois_t=dict(old.get("rois_t", {}),
                                    **{_tkey(it["time"]): list(it["roi"]) for it in self.items
@@ -680,24 +631,16 @@ class App:
         self.out.delete("1.0", "end")
         self.bar["value"] = 0
         self.status.set("measuring...")
-        kind = self.kind.get()
         items = [dict(it) for it in self.items]
-        threading.Thread(target=self.work, args=(self.dkey(), kind, items, toff),
+        threading.Thread(target=self.work, args=(self.dkey(), items, toff),
                          daemon=True).start()
 
-    def work(self, d, kind, items, toff):
+    def work(self, d, items, toff):
         try:
             prog = lambda i, n: self.q.put(("prog", i, n))  # noqa: E731
-            if kind == "photos":
-                res = hu.analyse_photos(d, [dict(path=it["paths"][0], label=it["label"],
-                                                 roi=it["roi"], base=it.get("base"))
-                                            for it in items],
-                                        toff, progress=prog)
-            else:
-                res = hu.analyse_blocks(d, [dict(paths=it["paths"], label=it["label"],
-                                                 roi=it["roi"], base=it.get("base"))
-                                            for it in items],
-                                        toff, progress=prog)
+            res = hu.analyse_photos(d, [dict(path=it["path"], label=it["label"],
+                                             roi=it["roi"], base=it.get("base"))
+                                        for it in items], toff, progress=prog)
             self.q.put(("done", res))
         except BaseException as e:
             self.q.put(("fail", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
@@ -711,7 +654,7 @@ class App:
                     self.bar["maximum"] = n
                     self.bar["value"] = i
                     self.status.set(f"measuring... {i} / {n}" if i < n else
-                                    "strains, plots and tracking sheets...")
+                                    "strains and plots...")
                 elif msg[0] == "done":
                     self.res = msg[1]
                     self.busy = False

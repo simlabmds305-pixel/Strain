@@ -2,35 +2,28 @@
 # ============================================================================
 #  HUMIDITY CYCLES  |  analysis
 #
-#  A bead dried, then swollen at high humidity, dried again, ...  Two kinds of
-#  set:
+#  A bead dried, then swollen at high humidity, dried again, ...: a handful of
+#  BEFORE / AFTER PHOTOS, one per step (fresh -> after 72 % -> after 97 % ...).
+#  The bead can sit somewhere else in every photo, so every photo has its own
+#  box and is measured to its own mat edge.
 #
-#    PHOTOS     a handful of before / after photos, one per step
-#               (fresh -> after 72 % -> after 97 % -> after 72 % ...).
-#               The bead can sit somewhere else in every photo, so every photo
-#               has its own box and is measured to its own mat edge.
+#  Photos only, on purpose.  Time-lapses are run in Bead Shrinkage: logic made
+#  for frames a minute apart (filling in a glitch from the neighbours, judging a
+#  frame by the frames around it) is wrong for photos taken days apart.
 #
-#    TIME-LAPSE one folder holding several recordings separated by long gaps
-#               (time-lapse at 72 %, overnight at 97 %, time-lapse at 72 % ...).
-#               The recordings ("blocks") are found from the gaps in the photos'
-#               capture times.  Each block has its own box and its own mat
-#               reading; every block votes with the first block's method so the
-#               volumes stay comparable from block to block.
-#
-#  Every strain is against the FIRST photo / first frame (the fresh bead), and
-#  the step-to-step change is given as well, so a swell shows as a rise and a
-#  dry as a fall.  Times come from the camera's own capture time in the TIFF
-#  (tag 306), not from the file name -- file names can be renamed out of order.
+#  Every strain is against the FIRST photo, and the change from the photo before
+#  is given as well, so a swell shows as a rise and a dry as a fall.  Times come
+#  from the camera's own clock in the TIFF (tag 306), not from the file name.
 #
 #  Writes <folder>/humidity_analysis/ :
 #    results.csv  summary.txt  settings.json
 #    strain_steps.png    volumetric / height / radius strain at every step
 #    step_changes.png    what each step did (rise = swelling, fall = drying)
-#    strain_vs_time.png  the same against real time (time-lapse: broken axis)
+#    strain_vs_time.png  the same against real time
+#    change_steps.png, change_vs_time.png   the same against the photo before
 #    photo_sheet.png     each photo's crop, aligned on the bead: fresh outline
 #                        cyan dashed, this one red dotted, no fill
 #    outlines.png        every outline on one picture, aligned on the mat
-#    blocks/<n>/height_track.png, radius_track.png, per_image.csv  (time-lapse)
 #
 #  Nothing in bead_pipeline / run_local / gui is changed by this file.
 # ============================================================================
@@ -41,7 +34,6 @@ import json
 import os
 import re
 import sys
-import warnings
 
 import matplotlib
 matplotlib.use("Agg")
@@ -54,7 +46,7 @@ import bead_pipeline as bp   # noqa: E402
 import run_local as rl       # noqa: E402  (palette, save_fig, track sheets)
 
 OUT_NAME = "humidity_analysis"
-GAP_MIN = 10.0               # a pause longer than this (min) starts a new block
+MAX_PHOTOS = 40              # more than this in one folder is a time-lapse
 SCALE = bp.DEFAULTS["SCALE_PX_PER_UM"]
 TO_MM3 = 1.0 / SCALE ** 3 / 1e9
 INK, INK2, SURFACE = rl.INK, rl.INK2, rl.SURFACE
@@ -84,47 +76,13 @@ def name_rh(name):
     return int(m.group(1)) if m else None
 
 
-_MTIME_OK = {}
-
-
-def _fast_time(path, files):
-    """When a photo was taken.  Reading the camera clock out of every TIFF costs
-    ~0.2 s a photo on the pen drive (minutes for a time-lapse folder), so the
-    file's modified time is used when, on a sample of the folder's photos, it
-    agrees with the camera clock to within 2 minutes; otherwise every photo's
-    camera clock is read."""
-    key = tuple(sorted({os.path.dirname(p) for p, _ in files}))
-    if key not in _MTIME_OK:
-        sample = [p for p, _ in files][:: max(1, len(files) // 5)][:6]
-        _MTIME_OK[key] = all(
-            abs((capture_time(p) - dt.datetime.fromtimestamp(os.path.getmtime(p)))
-                .total_seconds()) < 120 for p in sample)
-    if _MTIME_OK[key]:
-        return dt.datetime.fromtimestamp(os.path.getmtime(path))
-    return capture_time(path)
-
-
-def subfolders(folder):
-    """Sub-folders holding photos (one level down), not the results folders."""
-    out = []
-    for d in sorted(os.listdir(folder), key=lambda s: bp.natural_key(s)):
-        p = os.path.join(folder, d)
-        if os.path.isdir(p) and not d.lower().startswith(("analysis", OUT_NAME)) \
-                and bp.list_frames(p):
-            out.append(p)
-    return out
-
-
-def list_photos(folder, order="time", subdirs=True):
-    """Every image in the folder -- and, with subdirs, in its sub-folders one
-    level down (a time-lapse split into 'timelapse 1', 'timelapse 2' ...) -- as
-    dicts (path, name, time, rh, sub), in capture-time order ('time') or
-    natural file-name order ('name').  sub is the sub-folder's name, or ''."""
-    dirs = [(folder, "")] + ([(p, os.path.basename(p)) for p in subfolders(folder)]
-                             if subdirs else [])
-    files = [(p, sub) for d, sub in dirs for p in bp.list_frames(d)]
-    out = [dict(path=p, name=os.path.basename(p), time=_fast_time(p, files), rh=name_rh(p),
-                sub=sub) for p, sub in files]
+def list_photos(folder, order="time"):
+    """Every photo directly in the folder as dicts (path, name, time, rh), in
+    capture-time order ('time') or natural file-name order ('name').
+    Sub-folders are not read."""
+    out = [dict(path=p, name=os.path.basename(p), time=capture_time(p), rh=name_rh(p),
+                file_time=dt.datetime.fromtimestamp(os.path.getmtime(p)))
+           for p in bp.list_frames(folder)]
     if order == "time":
         out.sort(key=lambda d: d["time"])
     return out
@@ -141,24 +99,6 @@ def order_clash(photos):
            if a != b]
     return ("File-name order differs from the order the photos were taken:\n  "
             + "\n  ".join(bad))
-
-
-def find_blocks(photos, gap_min=GAP_MIN):
-    """Split photos into recordings: each sub-folder's photos on their own,
-    split at every pause > gap_min inside it, the recordings then put in the
-    order they were taken.  (Kept apart per sub-folder, a 'New folder' of single
-    photos taken during a time-lapse cannot cut that time-lapse into pieces.)"""
-    blocks = []
-    for sub in dict.fromkeys(p.get("sub", "") for p in photos):
-        cur = []
-        for p in sorted((q for q in photos if q.get("sub", "") == sub), key=lambda q: q["time"]):
-            if cur and (p["time"] - cur[-1]["time"]).total_seconds() / 60.0 > gap_min:
-                blocks.append(cur)
-                cur = []
-            cur.append(p)
-        if cur:
-            blocks.append(cur)
-    return sorted(blocks, key=lambda b: (b[0]["time"], b[0].get("sub", "")))
 
 
 def is_fresh(name):
@@ -179,17 +119,6 @@ def _label(p, fallback):
 
 def default_photo_labels(photos):
     return [_label(p, f"photo {i + 1}") for i, p in enumerate(photos)]
-
-
-def default_block_labels(blocks):
-    out = []
-    for i, b in enumerate(blocks):
-        p = next((q for q in b[:3] if q["rh"] or is_fresh(q["name"])), b[0])
-        sub = b[0].get("sub", "")
-        if sub and any(x is not b and x[0].get("sub") == sub for x in blocks):
-            sub = f"{sub} (part {sum(1 for x in blocks[:i + 1] if x[0].get('sub') == sub)})"
-        out.append(_label(p, sub or f"block {i + 1}"))
-    return out
 
 
 def ref_text(t):
@@ -295,7 +224,7 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
     cfgs = {r["path"]: dict(info["cfg"]) for _, r in t.iterrows()}
     res = dict(mode="photos", folder=folder, outdir=outdir, table=t, failed=failed,
                deciders=list(info["deciders"]), toff=toff, notes=list(info.get("notes", [])))
-    _write_all(res, t, cfgs, frames=None)
+    _write_all(res, t, cfgs)
     with open(os.path.join(outdir, "settings.json"), "w") as f:
         json.dump(dict(mode="photos", thresh_offset=toff,
                        items=[dict(image=os.path.basename(it["path"]), label=it["label"],
@@ -305,94 +234,8 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
     return res
 
 
-def analyse_blocks(folder, blocks, toff=0, out_name=OUT_NAME, progress=None, workers=None):
-    """blocks: list of dict(paths, label, roi) -- the recordings, in time order."""
-    total = sum(len(b["paths"]) for b in blocks)
-    outdir = os.path.join(folder, out_name)
-    os.makedirs(outdir, exist_ok=True)
-    t0 = capture_time(blocks[0]["paths"][0])
-    frames, first_info, done, cfgs = [], None, 0, {}
-    for bi, b in enumerate(blocks):
-        cfg = dict(base_cfg(toff), INTERVAL_S=60.0,
-                   ROI=tuple(int(v) for v in b["roi"]) if b.get("roi") else None,
-                   **(base_override(b["base"]) if b.get("base") else {}))
-        if first_info is not None:
-            # same estimators and weights as the first block: a volume from block
-            # 3 must be the same kind of number as the fresh bead's
-            cfg.update(FORCE_DECIDERS=list(first_info["deciders"]),
-                       FORCE_WEIGHTS=dict(first_info["med_conf"]))
-        off = done
-        df, info = bp.analyse_folder(
-            b["paths"], cfg, workers=workers,
-            progress=(lambda i, n, off=off: progress(off + i, total)) if progress else None)
-        done += len(b["paths"])
-        if first_info is None:
-            first_info = info
-        times = {os.path.basename(p): capture_time(p) for p in b["paths"]}
-        tb0 = min(times.values())
-        df["t_s"] = [(times[nm] - tb0).total_seconds() for nm in df["image"]]
-        # per block: the frames, and the usual height / radius tracking sheets
-        bdir = os.path.join(outdir, "blocks", f"{bi + 1}")
-        os.makedirs(bdir, exist_ok=True)
-        df.to_csv(os.path.join(bdir, "per_image.csv"), index=False)
-        try:
-            rl.plot_track_sheets(df, dict(info, cfg=dict(info["cfg"], INTERVAL_S=1.0)), bdir)
-        except Exception as e:          # a sheet is a picture, not a result
-            with open(os.path.join(bdir, "sheet_error.txt"), "w") as f:
-                f.write(f"{type(e).__name__}: {e}\n")
-        for _, r in df.iterrows():
-            tm = times[r["image"]]
-            cfgs[r["path"]] = dict(info["cfg"])
-            frames.append(dict(block=bi + 1, label=b["label"], image=r["image"],
-                               path=r["path"], taken=tm.strftime("%Y-%m-%d %H:%M:%S"),
-                               hours=(tm - t0).total_seconds() / 3600.0,
-                               min_in_block=(tm - tb0).total_seconds() / 60.0,
-                               V_mm3=_volume(r) * TO_MM3,
-                               V_disk_mm3=float(r["V_disk"]) * TO_MM3,
-                               V_extrap_mm3=float(r["V_extrap"]) * TO_MM3,
-                               h_um=float(r["h_um"]), a_um=float(r["a_um"]),
-                               mat_y=float(r["baseline_y"]), tier=r.get("tier", ""),
-                               use=bool(r.get("use", True))))
-    fr = pd.DataFrame(frames)
-    fr = _with_strains(fr)
-    fr.to_csv(os.path.join(outdir, "all_frames.csv"), index=False)
-
-    # one row per block end: start and end of every recording (median of 3
-    # frames, so one jittery frame does not set a step's value)
-    rows = []
-    for bi, b in enumerate(blocks):
-        g = fr[(fr["block"] == bi + 1) & fr["use"]]
-        g = g if len(g) else fr[fr["block"] == bi + 1]
-        for where, sl in (("start", g.head(3)), ("end", g.tail(3))):
-            r = sl.iloc[0 if where == "start" else -1]
-            rows.append(dict(step=len(rows) + 1, label=f"{b['label']} - {where}",
-                             block=bi + 1, image=r["image"], path=r["path"],
-                             taken=r["taken"], hours=float(r["hours"]),
-                             **{c: float(sl[c].median()) for c in
-                                ("V_mm3", "V_disk_mm3", "V_extrap_mm3", "h_um", "a_um",
-                                 "mat_y")},
-                             tier=r["tier"], use=True, n_frames=int(len(g))))
-    t = _with_strains(pd.DataFrame(rows))
-    res = dict(mode="timelapse", folder=folder, outdir=outdir, table=t, frames=fr,
-               blocks=[dict(label=b["label"], n=len(b["paths"]),
-                            first=os.path.basename(b["paths"][0]),
-                            last=os.path.basename(b["paths"][-1]),
-                            roi=b.get("roi"), base=b.get("base")) for b in blocks],
-               deciders=list(first_info["deciders"]), toff=toff, failed=[],
-               notes=list(first_info.get("notes", [])))
-    _write_all(res, t, cfgs, frames=fr)
-    with open(os.path.join(outdir, "settings.json"), "w") as f:
-        json.dump(dict(mode="timelapse", thresh_offset=toff, gap_min=GAP_MIN,
-                       blocks=[dict(label=b["label"], first=os.path.basename(b["paths"][0]),
-                                    last=os.path.basename(b["paths"][-1]), n=len(b["paths"]),
-                                    roi=list(b["roi"]) if b.get("roi") else None,
-                                    base=list(b["base"]) if b.get("base") else None)
-                               for b in blocks]), f, indent=2)
-    return res
-
-
 # ----------------------------------------------------------------- writing
-def _write_all(res, t, cfgs, frames=None):
+def _write_all(res, t, cfgs):
     out = res["outdir"]
     t.drop(columns=["path"]).to_csv(os.path.join(out, "results.csv"), index=False)
     txt = summary_text(res)
@@ -401,14 +244,9 @@ def _write_all(res, t, cfgs, frames=None):
     failed = []
     jobs = [("strain_steps.png", lambda o: plot_steps(t, o, res)),
             ("step_changes.png", lambda o: plot_changes(t, o, res)),
-            ("strain_vs_time.png", lambda o: (plot_timeline(frames, t, o, res)
-                                              if frames is not None else
-                                              plot_vs_hours(t, o, res))),
+            ("strain_vs_time.png", lambda o: plot_vs_hours(t, o, res)),
             ("change_steps.png", lambda o: plot_steps(t, o, res, kind="change")),
-            ("change_vs_time.png", lambda o: (plot_timeline(vs_previous(frames), t, o, res,
-                                                            kind="change")
-                                              if frames is not None else
-                                              plot_vs_hours(t, o, res, kind="change"))),
+            ("change_vs_time.png", lambda o: plot_vs_hours(t, o, res, kind="change")),
             ("photo_sheet.png + outlines.png", lambda o: plot_sheet(t, cfgs, out))]
     for name, draw in jobs:
         try:
@@ -426,21 +264,11 @@ def _write_all(res, t, cfgs, frames=None):
 def summary_text(res):
     t = res["table"]
     L = ["=" * 78,
-         f" HUMIDITY CYCLES  {os.path.basename(res['folder'])}   "
-         f"({'before / after photos' if res['mode'] == 'photos' else 'time-lapse blocks'})",
+         f" HUMIDITY CYCLES  {os.path.basename(res['folder'])}   (before / after photos)",
          "=" * 78, "",
          f"  strains are against step 1 ({t['label'].iloc[0]}, {t['image'].iloc[0]});"
          " 'change' is against the step before.",
-         f"  volume decided by {' + '.join(res['deciders'])}"
-         + ("  (every block votes the same way as block 1)" if res["mode"] == "timelapse"
-            else "") + f";  threshold offset {res['toff']}", ""]
-    if res["mode"] == "timelapse":
-        L.append("  blocks (recordings found from the gaps in capture time):")
-        for i, b in enumerate(res["blocks"]):
-            L.append(f"    {i + 1}. {b['label']:<24s} {b['n']:4d} frames  {b['first']} -> "
-                     f"{b['last']}   crop {rl._crop_txt(b['roi'])}"
-                     + ("   base drawn by hand" if b.get("base") else ""))
-        L += ["  start / end of each block = median of its first / last 3 frames", ""]
+         f"  volume decided by {' + '.join(res['deciders'])};  threshold offset {res['toff']}", ""]
     hdr = (f"  {'#':>2s}  {'step':<28s} {'taken':<16s} {'h':>6s}  {'V mm3':>7s}  "
            f"{'vol %':>7s} {'chg %':>7s}  {'height %':>8s} {'chg %':>7s}  "
            f"{'radius %':>8s} {'chg %':>7s}")
@@ -458,7 +286,9 @@ def summary_text(res):
     for _, r in t.iterrows():
         L.append(f"    {int(r['step']):>2d}  {str(r['label'])[:28]:<28s} V_disk "
                  f"{f(r['V_disk_strain_pct'])}   V_extrap {f(r['V_extrap_strain_pct'])}"
-                 + ("" if r.get("use", True) else "   (marked broken - check the sheet)"))
+                 + {"REJECT": "   (no method trusted on this photo - check the sheet)",
+                    "CONFLICT": "   (volumes differ by more than 5 % - check the sheet)"}
+                 .get(r.get("tier", ""), ""))
     swell = t[t["vol_change_pct"] > 0]
     if len(swell):
         L += ["", "  volume went UP at: " + ", ".join(
@@ -625,85 +455,6 @@ def plot_vs_hours(t, out, res, kind="strain"):
     axes[-1].set_xlabel("hours since step 1")
     _legend_conditions(fig, t["label"])
     fig.tight_layout(rect=(0, 0.04, 1, 1))
-    rl.save_fig(fig, out)
-    plt.close(fig)
-
-
-def vs_previous(fr):
-    """Frames re-referenced to the photo before each exposure: block 1 to its
-    own first frame, every later block to the END of the block before it
-    (median of its last 3 frames).  Written into the *_strain_pct columns so the timeline
-    plot draws it unchanged."""
-    if fr is None:
-        return None
-    g = fr.copy()
-    for bi in sorted(g["block"].unique()):
-        cur = g["block"] == bi
-        src = g[(g["block"] == (bi - 1 if bi > 1 else bi)) & g["use"]]
-        if not len(src):
-            src = g[g["block"] == (bi - 1 if bi > 1 else bi)]
-        # block 1: its first frame (a fresh bead changes fast, so no averaging);
-        # later blocks: the previous block's settled end, median of 3 frames
-        ref = src.tail(3) if bi > 1 else src.head(1)
-        for col, name in (("V_mm3", "vol"), ("h_um", "height"), ("a_um", "radius")):
-            g.loc[cur, f"{name}_strain_pct"] = 100.0 * (g.loc[cur, col]
-                                                        / float(ref[col].median()) - 1.0)
-    return g
-
-
-def plot_timeline(fr, t, out, res, kind="strain"):
-    """Time-lapse: one column per block, width by its length, the gaps between
-    them cut out (each gap's length written over the next block)."""
-    nb = int(fr["block"].max())
-    dur = [max(5.0, float(fr.loc[fr["block"] == b, "min_in_block"].max())) for b in
-           range(1, nb + 1)]
-    fig, axes = plt.subplots(3, nb, figsize=(max(10, 4.2 * nb), 10), sharey="row",
-                             gridspec_kw=dict(width_ratios=dur, wspace=0.06),
-                             squeeze=False)
-    for bi in range(nb):
-        g = fr[fr["block"] == bi + 1]
-        u = g[g["use"]] if g["use"].any() else g
-        lab = str(g["label"].iloc[0])
-        c = colour_for(lab)
-        when = g["taken"].iloc[0][5:16]
-        if bi:
-            prev_end = fr[fr["block"] == bi]["hours"].max()
-            gap = float(g["hours"].min() - prev_end)
-            head = f"{bi + 1}. {lab}\n{when}   (after a {gap:.1f} h gap)"
-        else:
-            head = f"{bi + 1}. {lab}\n{when}"
-        for r, (q, yl) in enumerate(QTY):
-            ax = axes[r, bi]
-            ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
-            y = u[f"{q}_strain_pct"].to_numpy(float)
-            xm = u["min_in_block"].to_numpy(float)
-            ax.plot(xm, y, "-", color=c, lw=2, zorder=3)
-            bad = g[~g["use"]]
-            if len(bad):
-                ax.plot(bad["min_in_block"], bad[f"{q}_strain_pct"], "o", mfc="none",
-                        mec=rl.STATUS["REJECT"], ms=7, zorder=4)
-            for xx, yy, va, dy in ((xm[0], y[0], "bottom", 8), (xm[-1], y[-1], "top", -8)):
-                ax.annotate(f"{yy:+.1f}", (xx, yy), xytext=(0, dy), textcoords="offset points",
-                            ha="left" if xx == xm[0] else "right", va=va, fontsize=8.5,
-                            bbox=dict(boxstyle="round,pad=0.15", fc=SURFACE, ec="none",
-                                      alpha=0.85))
-            rl.tidy(ax, None, None, _ylab(yl, kind) if bi == 0 else None)
-            ax.margins(y=0.14)
-            if bi:
-                ax.spines["left"].set_linestyle((0, (3, 3)))
-            if r == 0:
-                ax.set_title(head, fontsize=9, loc="left")
-            if r == 2:
-                ax.set_xlabel("min in this block")
-    what = (f"Strain against {ref_text(t)}, block by block" if kind == "strain" else
-            "Change from the photo before each exposure (block 1: its own start; later blocks: "
-            "the end of the block before)")
-    fig.suptitle(f"{what}  -  {os.path.basename(res['folder'])}   (gaps between blocks cut out)",
-                 x=0.01, ha="left", fontsize=11 if kind == "change" else 12)
-    _legend_conditions(fig, t["label"])
-    with warnings.catch_warnings():          # shared y across the blocks: harmless
-        warnings.simplefilter("ignore")
-        fig.tight_layout(rect=(0, 0.04, 1, 0.97))
     rl.save_fig(fig, out)
     plt.close(fig)
 

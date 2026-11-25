@@ -1599,7 +1599,8 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # either side of it.
     s = df["spread_pct"].to_numpy(float)
     fin = np.isfinite(s)
-    if fin.sum() >= 5:
+    # (not for before / after photos: they have no neighbours to be judged by)
+    if fin.sum() >= 5 and not cfg.get("PAIR_MODE"):
         local = pd.Series(s).rolling(9, center=True, min_periods=3).median().to_numpy()
         resid = s - local
         r = resid[np.isfinite(resid)]

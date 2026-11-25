@@ -1,6 +1,6 @@
 @echo off
-rem Opens the Humidity Cycles window (before / after photos, or time-lapse
-rem blocks between humidity exposures). Separate from Bead Shrinkage.
+rem Opens the Humidity Cycles window (before / after photos only; time-lapses
+rem are run in Bead Shrinkage).
 set "PYW=C:\ProgramData\anaconda3\pythonw.exe"
 if not exist "%PYW%" set "PYW=%USERPROFILE%\anaconda3\pythonw.exe"
 if not exist "%PYW%" set "PYW=pythonw"
