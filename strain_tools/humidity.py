@@ -283,6 +283,7 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
                          contact_angle_deg=float(r.get("contact_angle_deg", np.nan)),
                          mat_y=float(r["baseline_y"]), tier=r.get("tier", ""),
                          use=bool(r.get("use", True)),
+                         odd_brightness=bool(r.get("outlier", False)),
                          crop=",".join(str(v) for v in per.get(nm, ())) or "whole frame",
                          base="drawn" if it.get("base") else "mat edge"))
     if len(rows) < 2:
@@ -465,6 +466,10 @@ def summary_text(res):
             for _, r in swell.iterrows())]
     if res.get("failed"):
         L += ["", "  could not be measured: " + ", ".join(res["failed"])]
+    if "odd_brightness" in t.columns and t["odd_brightness"].any():
+        L += ["", "  brightness differs from the other photos on step(s) "
+              + ", ".join(str(int(s)) for s in t.loc[t["odd_brightness"], "step"])
+              + " - measured as it is (nothing filled in); check its outline on photo_sheet"]
     if "base" in t.columns and (t["base"] == "drawn").any():
         L += ["", "  base drawn by hand (measured down to the drawn line, blue smear above it "
               "counted as bead) on step(s): "

@@ -67,6 +67,15 @@ check("the bright start is left alone", not out["outlier"].to_numpy()[:20].any()
 check("a glitch is repaired from its neighbours",
       abs(out["V_consensus"][40] - np.interp(40, [39, 41], [raw[39], raw[41]])) < 1e-6)
 
+print("\nsingle photos (before / after) are flagged but never filled in")
+df = fake_run(glitches=[(40, 1.4)])
+df["measured"] = True
+raw = df["V_consensus"].to_numpy().copy()
+out = bp.mark_brightness_outliers(df, 2.5, fill=False)
+check("the odd photo is still flagged", bool(out["outlier"][40]))
+check("but every photo keeps its own measurement",
+      np.array_equal(out["V_consensus"].to_numpy(), raw) and bool(out["measured"].all()))
+
 print("\nno value is ever extrapolated beyond the measured range")
 df = fake_run(n=40)
 df.loc[:9, "brightness"] = 200.0                    # first 10 frames unusable

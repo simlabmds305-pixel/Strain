@@ -1386,7 +1386,7 @@ def find_frozen(df, cols=("V_disk", "V_extrap"), min_run=3):
     return out
 
 
-def mark_brightness_outliers(df, z=2.5):
+def mark_brightness_outliers(df, z=2.5, fill=True):
     """Flag frames whose brightness jumps away from their NEIGHBOURS, and fill
     those frames in from either side, so one exposure glitch cannot spike the
     curve.
@@ -1405,6 +1405,11 @@ def mark_brightness_outliers(df, z=2.5):
     handed frame 34's value -- identical to nine decimal places, a perfectly
     flat half-hour that looked like a bead sitting still and quietly became
     V0.  A frame with no good neighbour on one side keeps what was measured.
+
+    fill=False flags but fills nothing.  Filling only makes sense between frames
+    a minute apart: for single photos taken days apart (92%_8hr_1 BA) it replaced
+    a real photo by the average of two other states of the bead, -10.5 % for a
+    measured -21.4 %.
     """
     import pandas as pd
     b = df["brightness"].to_numpy(float)
@@ -1437,7 +1442,7 @@ def mark_brightness_outliers(df, z=2.5):
     df = df.copy()
     df["outlier"] = bad
     gi = np.flatnonzero(~bad)
-    if bad.any() and gi.size >= 2:
+    if fill and bad.any() and gi.size >= 2:
         bi = np.flatnonzero(bad)
         inside = bi[(bi > gi.min()) & (bi < gi.max())]   # never extrapolate
         if inside.size:
@@ -1570,7 +1575,8 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
     # creates repeats and would mask the thing this is looking for.
     frozen = find_frozen(df)
     df["measured"] = True
-    df = mark_brightness_outliers(df, cfg["OUTLIER_Z"])
+    # photos measured on their own (before / after) are not a series: never filled
+    df = mark_brightness_outliers(df, cfg["OUTLIER_Z"], fill=not cfg.get("PAIR_MODE"))
 
     # ---- quarantine --------------------------------------------------------
     # What to throw out depends on what the number is FOR.  The strain is a
@@ -1794,8 +1800,10 @@ def warnings_for(df, info):
                            f"shrinking before the reference.")
     if df["outlier"].any():
         k = int(df["outlier"].sum())
-        out.append(f"{k} frame(s) had outlier brightness (exposure glitch / shadow); their "
-                   f"volumes were interpolated from the neighbours.")
+        j = int((~df["measured"]).sum()) if "measured" in df.columns else k
+        out.append(f"{k} frame(s) had outlier brightness (exposure glitch / shadow); "
+                   f"{j} of them had their volumes interpolated from the neighbours, the "
+                   f"rest keep what was measured.")
 
     clipped = df[df["clipped"].astype(bool)]
     if len(clipped):
