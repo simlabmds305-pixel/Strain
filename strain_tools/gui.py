@@ -577,6 +577,20 @@ class App:
         if not getattr(self, "all_paths", None) or not os.path.isdir(d):
             self.status.set("Choose a folder first.")
             return
+        if self.base and (self.ba.get() or self.own_crop.get() or self.last_final.get()):
+            # One drawn baseline is used for EVERY image.  Separate photos (before /
+            # after, or a final photo) are taken after the stage has moved: on
+            # f95%_8hr_3 the base sat 25 px lower in the second photo, and one line
+            # for both read -27.8 % where the right line on each gives -21.4 %.
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "Baseline and separate photos",
+                "The drawn baseline is used for every image, so it only suits a "
+                "continuous time-lapse.\n\nThis run includes a separate photo (before / "
+                "after, or a final photo), where the base usually sits somewhere else.\n\n"
+                "Either clear the baseline here, or measure the photos in Humidity Cycles, "
+                "where each photo gets its own baseline.", parent=self.root)
+            return
         if not self.roi:
             from tkinter import messagebox
             if not messagebox.askyesno("No crop", "No box is drawn, so the whole frame will "
