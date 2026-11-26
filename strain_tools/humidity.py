@@ -331,8 +331,16 @@ QTY = [("vol", "volumetric strain (%)"), ("height", "height strain (%)"),
        ("radius", "radius strain (%)")]
 
 
-def _ticks(t):
-    return [f"{int(r['step'])}. {r['label']}\n{r['taken'][5:16]}" for _, r in t.iterrows()]
+def _ticks(t, dates=True):
+    return [f"{int(r['step'])}. {r['label']}" + (f"\n{r['taken'][5:16]}" if dates else "")
+            for _, r in t.iterrows()]
+
+
+def set_name(res):
+    """'90% PVC' from a folder named '90%_8hr_2 BA'; the folder name otherwise."""
+    name = os.path.basename(res["folder"])
+    m = re.match(r"f?(\d{2,3})\s*%", name)
+    return f"{m.group(1)}% PVC" if m else name
 
 
 def _label_points(ax, x, y, fmt="{:+.1f}"):
@@ -407,14 +415,16 @@ def plot_steps(t, out, res, kind="strain", volume_only=False):
         ax.plot(x, y, "-", color="#9a9994", lw=1.6, zorder=2)
         ax.scatter(x, y, c=cols, s=80, edgecolors=SURFACE, linewidths=1.8, zorder=3)
         _label_points(ax, x, y)
-        rl.tidy(ax, None, None, _ylab(yl, kind))
+        ylab = _ylab(yl, kind)
+        rl.tidy(ax, None, None, ylab[:1].upper() + ylab[1:] if volume_only else ylab)
         lo, hi = min(0.0, np.nanmin(y)), max(0.0, np.nanmax(y))
         pad = 0.18 * ((hi - lo) or 1.0)
         ax.set_ylim(lo - pad, hi + pad)
     head = TITLES[kind][0].replace("the fresh bead", ref_text(t))
-    axes[0].set_title(f"{head}  -  {os.path.basename(res['folder'])}", loc="left", pad=10)
+    name = set_name(res) if volume_only else os.path.basename(res["folder"])
+    axes[0].set_title(f"{head}  -  {name}", loc="left", pad=10)
     axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(_ticks(t), fontsize=8)
+    axes[-1].set_xticklabels(_ticks(t, dates=not volume_only), fontsize=8.5 if volume_only else 8)
     _legend_conditions(fig, t["label"])
     fig.tight_layout(rect=(0, 0.09 if volume_only else 0.04, 1, 1))
     rl.save_fig(fig, out)
