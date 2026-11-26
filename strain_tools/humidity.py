@@ -247,6 +247,9 @@ def _write_all(res, t, cfgs):
             ("step_changes.png", lambda o: plot_changes(t, o, res)),
             ("strain_vs_time.png", lambda o: plot_vs_hours(t, o, res)),
             ("change_steps.png", lambda o: plot_steps(t, o, res, kind="change")),
+            ("strain_steps_volume.png", lambda o: plot_steps(t, o, res, volume_only=True)),
+            ("change_steps_volume.png", lambda o: plot_steps(t, o, res, kind="change",
+                                                             volume_only=True)),
             ("change_vs_time.png", lambda o: plot_vs_hours(t, o, res, kind="change")),
             ("volume_steps.png", lambda o: plot_volume_steps(t, o, res)),
             ("photo_sheet.png + outlines.png", lambda o: plot_sheet(t, cfgs, out))]
@@ -388,12 +391,17 @@ def _ylab(yl, kind):
     return yl.replace("strain", "change from photo before") if kind == "change" else yl
 
 
-def plot_steps(t, out, res, kind="strain"):
+def plot_steps(t, out, res, kind="strain", volume_only=False):
+    """Every step as a point: volume, height and radius (three panels), or the
+    volume alone (volume_only)."""
     n = len(t)
-    fig, axes = plt.subplots(3, 1, figsize=(max(8.5, 1.6 * n + 3), 10), sharex=True)
+    qty = QTY[:1] if volume_only else QTY
+    fig, axes = plt.subplots(len(qty), 1, figsize=(max(8.5, 1.6 * n + 3), 4.6 if volume_only else 10),
+                             sharex=True, squeeze=False)
+    axes = axes[:, 0]
     x = np.arange(n)
     cols = [colour_for(l) for l in t["label"]]
-    for ax, (q, yl) in zip(axes, QTY):
+    for ax, (q, yl) in zip(axes, qty):
         y = _y(t, q, kind)
         ax.axhline(0, lw=1, color="#c9c8c3", zorder=1)
         ax.plot(x, y, "-", color="#9a9994", lw=1.6, zorder=2)
@@ -408,7 +416,7 @@ def plot_steps(t, out, res, kind="strain"):
     axes[-1].set_xticks(x)
     axes[-1].set_xticklabels(_ticks(t), fontsize=8)
     _legend_conditions(fig, t["label"])
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.tight_layout(rect=(0, 0.09 if volume_only else 0.04, 1, 1))
     rl.save_fig(fig, out)
     plt.close(fig)
 
