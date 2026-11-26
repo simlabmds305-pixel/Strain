@@ -1100,11 +1100,12 @@ def analyse_set(folder, cfg, out_name="analysis", pattern="*", skip=(),
             # the last photo gets its own crop; the first keeps the time-lapse's,
             # so it is still the same measurement as step 1's first frame
             cfg_pair["ROI_PER_IMAGE"] = {os.path.basename(last): tuple(pair_roi)}
-            if cfg.get("BASE_LINE"):
-                # a photo taken after the stage moved: the hand-drawn base of the
-                # run does not apply to it, so it finds its own mat edge
-                cfg_pair["PER_IMAGE"] = {os.path.basename(last): dict(
-                    BASE_LINE=None, MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"])}
+        if cfg.get("BASE_LINE") and (pair_roi or info["final_photo"]):
+            # a separate photo, taken later and usually after the stage moved: the
+            # run's hand-drawn base does not apply to it (on f95%_8hr_3 the base sat
+            # 25 px lower, -27.8 % against -21.4 %), so it finds its own mat edge
+            cfg_pair["PER_IMAGE"] = {os.path.basename(last): dict(
+                BASE_LINE=None, MAT_CHROMA_MIN=bp.DEFAULTS["MAT_CHROMA_MIN"])}
         try:
             dfp, infop = run_pair((first, last), cfg_pair, pdir, quiet=True, why=why)
             pair = dict(first=os.path.basename(first), last=os.path.basename(last),
