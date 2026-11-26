@@ -248,6 +248,7 @@ def _write_all(res, t, cfgs):
             ("strain_vs_time.png", lambda o: plot_vs_hours(t, o, res)),
             ("change_steps.png", lambda o: plot_steps(t, o, res, kind="change")),
             ("change_vs_time.png", lambda o: plot_vs_hours(t, o, res, kind="change")),
+            ("volume_steps.png", lambda o: plot_volume_steps(t, o, res)),
             ("photo_sheet.png + outlines.png", lambda o: plot_sheet(t, cfgs, out))]
     for name, draw in jobs:
         try:
@@ -408,6 +409,57 @@ def plot_steps(t, out, res, kind="strain"):
     axes[-1].set_xticklabels(_ticks(t), fontsize=8)
     _legend_conditions(fig, t["label"])
     fig.tight_layout(rect=(0, 0.04, 1, 1))
+    rl.save_fig(fig, out)
+    plt.close(fig)
+
+
+def plot_volume_steps(t, out, res):
+    """Volume only: against the fresh bead (top) and against the photo before
+    (bottom).  The whisker on each value spans its V_disk and V_extrap values,
+    the minimum uncertainty of that step."""
+    n = len(t)
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(max(8.5, 1.5 * n + 3), 8.2), sharex=True,
+                                 gridspec_kw=dict(height_ratios=[1, 1]))
+    x = np.arange(n)
+    cols = [colour_for(l) for l in t["label"]]
+
+    y = t["vol_strain_pct"].to_numpy(float)
+    lo = np.minimum(t["V_disk_strain_pct"], t["V_extrap_strain_pct"]).to_numpy(float)
+    hi = np.maximum(t["V_disk_strain_pct"], t["V_extrap_strain_pct"]).to_numpy(float)
+    a1.axhline(0, lw=1, color="#c9c8c3", zorder=1)
+    a1.plot(x, y, "-", color="#9a9994", lw=1.6, zorder=2)
+    a1.vlines(x, lo, hi, color=INK2, lw=1.4, zorder=2)
+    a1.scatter(x, y, c=cols, s=85, edgecolors=SURFACE, linewidths=1.8, zorder=3)
+    _label_points(a1, x, y)
+    rl.tidy(a1, None, None, "volume vs fresh bead (%)")
+    b, top = min(0.0, np.nanmin(lo)), max(0.0, np.nanmax(hi))
+    a1.set_ylim(b - 0.18 * ((top - b) or 1), top + 0.18 * ((top - b) or 1))
+    a1.set_title(f"Volumetric strain against {ref_text(t)}  -  {os.path.basename(res['folder'])}",
+                 loc="left", pad=10)
+
+    c = t["vol_change_pct"].to_numpy(float).copy()
+    clo = np.minimum(t["V_disk_change_pct"], t["V_extrap_change_pct"]).to_numpy(float).copy()
+    chi = np.maximum(t["V_disk_change_pct"], t["V_extrap_change_pct"]).to_numpy(float).copy()
+    c[0] = clo[0] = chi[0] = np.nan                       # step 1 has nothing before it
+    a2.axhline(0, lw=1, color="#8d8c87", zorder=1)
+    a2.bar(x[1:], c[1:], color=cols[1:], width=0.6, zorder=2)
+    a2.vlines(x[1:], clo[1:], chi[1:], color=INK, lw=1.4, zorder=3)
+    for xi, yi in zip(x[1:], c[1:]):
+        if np.isfinite(yi):
+            a2.annotate(f"{yi:+.2f}", (xi, yi), xytext=(9, 0), textcoords="offset points",
+                        ha="left", va="center", fontsize=8.5, color=INK,
+                        bbox=dict(boxstyle="round,pad=0.15", fc=SURFACE, ec="none", alpha=0.85))
+    b, top = min(0.0, np.nanmin(clo)), max(0.0, np.nanmax(chi))
+    a2.set_ylim(b - 0.15 * ((top - b) or 1), top + 0.15 * ((top - b) or 1))
+    rl.tidy(a2, None, None, "change from photo before (%)")
+    a2.set_title("Volume change from the photo before  (up = swelled, down = shrank)",
+                 loc="left", pad=8, fontsize=10.5)
+    a2.set_xticks(x)
+    a2.set_xticklabels(_ticks(t), fontsize=8)
+    _legend_conditions(fig, t["label"])
+    fig.text(0.99, 0.005, "whiskers: from the V_disk to the V_extrap value of each step",
+             ha="right", va="bottom", fontsize=8, color=INK2)
+    fig.tight_layout(rect=(0, 0.045, 1, 1))
     rl.save_fig(fig, out)
     plt.close(fig)
 

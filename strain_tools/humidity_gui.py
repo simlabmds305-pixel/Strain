@@ -221,6 +221,7 @@ class App:
                            ("Change vs time", "change_vs_time.png"),
                            ("Change bars", "step_changes.png"),
                            ("|", None),
+                           ("Volume only", "volume_steps.png"),
                            ("Photo sheet", "photo_sheet.png"),
                            ("Outlines", "outlines.png"),
                            ("Summary", "summary.txt"),
