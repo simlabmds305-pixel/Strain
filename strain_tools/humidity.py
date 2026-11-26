@@ -213,6 +213,7 @@ def analyse_photos(folder, items, toff=0, out_name=OUT_NAME, progress=None, work
                          mat_y=float(r["baseline_y"]), tier=r.get("tier", ""),
                          use=bool(r.get("use", True)),
                          odd_brightness=bool(r.get("outlier", False)),
+                         base_filled_px=int(r.get("base_filled_px", 0) or 0),
                          crop=",".join(str(v) for v in per.get(nm, ())) or "whole frame",
                          base="drawn" if it.get("base") else "mat edge"))
     if len(rows) < 2:
@@ -300,6 +301,11 @@ def summary_text(res):
         L += ["", "  brightness differs from the other photos on step(s) "
               + ", ".join(str(int(s)) for s in t.loc[t["odd_brightness"], "step"])
               + " - measured as it is (nothing filled in); check its outline on photo_sheet"]
+    if "base_filled_px" in t.columns and (t["base_filled_px"] > 0).any():
+        L += ["", "  base carried down to the drawn line (too dark or blurred to see), rows: "
+              + ", ".join(f"step {int(r.step)} {int(r.base_filled_px)} px"
+                          for r in t.itertuples() if r.base_filled_px > 0)
+              + "  (about 0.3 % of the volume per row; check the line on photo_sheet)"]
     if "base" in t.columns and (t["base"] == "drawn").any():
         L += ["", "  base drawn by hand (measured down to the drawn line, blue smear above it "
               "counted as bead) on step(s): "

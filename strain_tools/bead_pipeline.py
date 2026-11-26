@@ -484,24 +484,38 @@ def clamp_base_to_walls(mask, yline, band=BASE_LINE_BAND_PX, fit=BASE_WALL_FIT_P
     the bead's own sides: each side is fitted (straight line, x against row) on
     the rows just above the band, where the edge is sharp and no mat colour
     reaches, and carried down to the line.  Anything outside -- a foot of
-    mat glow left by a line drawn past the bead's corner -- is dropped."""
+    mat glow left by a line drawn past the bead's corner -- is dropped.
+
+    And everything between those sides, down to the line, is bead.  The line
+    says where the bead stands; a base too dark or blurred for the threshold
+    (90%_8hr_2, Image_006: 10-15 px short of a correctly drawn line) used to
+    leave the outline stopping above it.  Returns (mask, rows filled) -- the
+    rows between where the threshold stopped and the line, so a report can say
+    how much of the base was carried down rather than seen."""
     H, W = mask.shape
     top = int(np.floor(float(np.median(yline)) - band))
     rows = [r for r in range(max(0, top - fit), max(0, min(H, top))) if mask[r].any()]
     if len(rows) < 10:
-        return mask                       # too little bead above the band to fit on
+        return mask, 0                    # too little bead above the band to fit on
     left = [int(np.argmax(mask[r] > 0)) for r in rows]
     right = [W - 1 - int(np.argmax(mask[r][::-1] > 0)) for r in rows]
     pl, pr = np.polyfit(rows, left, 1), np.polyfit(rows, right, 1)
+    seen = np.flatnonzero(mask.any(axis=1))
+    last_seen = int(seen[-1]) if seen.size else top
     out = mask.copy()
     for r in range(max(0, top), H):
-        lo = int(np.floor(np.polyval(pl, r) - margin))
-        hi = int(np.ceil(np.polyval(pr, r) + margin))
+        fl, fr = np.polyval(pl, r), np.polyval(pr, r)
+        lo = int(np.floor(fl - margin))
+        hi = int(np.ceil(fr + margin))
         if lo > 0:
             out[r, :min(W, lo)] = 0
         if hi < W - 1:
             out[r, max(0, hi + 1):] = 0
-    return out
+        a, b = max(0, int(np.ceil(fl))), min(W - 1, int(np.floor(fr)))
+        if b >= a:
+            out[r, a:b + 1] = 1           # between the sides is bead, down to the line
+    out[np.arange(H)[:, None] > yline[None, :]] = 0
+    return out, max(0, int(round(float(np.median(yline)) - last_seen)))
 
 
 def _measure_one(path, cfg, want_mask=False):
@@ -585,7 +599,7 @@ def _measure_one(path, cfg, want_mask=False):
     if line:
         # and whatever foot is left: the bead's sides, carried straight down
         # into the blurred band, are its edges -- not the line's ends
-        mask = clamp_base_to_walls(mask, yline)
+        mask, base_filled = clamp_base_to_walls(mask, yline)
 
     pr = profile_from_mask(mask)
     if pr is None:
@@ -641,6 +655,7 @@ def _measure_one(path, cfg, want_mask=False):
         out["mat_y"] = slope * xc + icpt
         out["mat_tilt_deg"] = float(np.degrees(np.arctan(slope)))
         out["base_drawn"] = True
+        out["base_filled_px"] = base_filled    # rows carried down to the line, not seen
 
     if want_mask:
         out["mask"] = mask
@@ -1512,6 +1527,7 @@ def analyse_folder(paths, cfg=None, workers=None, progress=None):
         m["brightness"] = f["brightness"]
         m["clipped"] = f["clipped"]
         m["leak_rows"] = f.get("leak_rows", 0)
+        m["base_filled_px"] = f.get("base_filled_px", 0)
         m["mat_edge_y"] = f.get("mat_y", np.nan) if f.get("mat_y") is not None else np.nan
         m["touches_roi_bottom"] = f["touches_roi_bottom"]
         m["t_s"] = _time_for(f["path"], i, cfg)

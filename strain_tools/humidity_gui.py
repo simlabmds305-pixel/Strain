@@ -93,7 +93,10 @@ class App:
                         command=self.rebuild).grid(row=1, column=2, sticky="w", padx=4)
         ttk.Label(opt, text="Threshold offset:").grid(row=1, column=3, sticky="e", padx=(24, 4))
         self.toff = tk.StringVar(value="0")
-        ttk.Entry(opt, textvariable=self.toff, width=6).grid(row=1, column=4, sticky="w")
+        te = ttk.Entry(opt, textvariable=self.toff, width=6)
+        te.grid(row=1, column=4, sticky="w")
+        te.bind("<Return>", lambda _e: self.draw_preview())     # strip follows the offset
+        te.bind("<FocusOut>", lambda _e: self.draw_preview())
         ttk.Label(opt, text="(0 = automatic; e.g. -40 if the outline stops above the mat)",
                   foreground="#555").grid(row=1, column=5, sticky="w", padx=6)
 
@@ -420,8 +423,15 @@ class App:
         lx0, ly0, lx1, ly1 = base
         slope = (ly1 - ly0) / (lx1 - lx0) if lx1 != lx0 else 0.0
         # the bead's own corners on the line, measured as the run will measure it
-        m = hu.bp.measure_one((path, dict(hu.bp.DEFAULTS, ROI=it.get("roi"),
-                                          **hu.base_override(base)), True))
+        # exactly the settings the run will use -- the threshold offset included,
+        # or the strip shows an outline the run never measures
+        try:
+            toff = int(float(self.toff.get() or 0))
+        except ValueError:
+            toff = 0
+        cfg = dict(hu.bp.DEFAULTS, **hu.base_cfg(toff))
+        cfg.update(ROI=it.get("roi"), PAIR_MODE=True, **hu.base_override(base))
+        m = hu.bp.measure_one((path, cfg, True))
         if m.get("ok"):
             low = m["Y"] >= m["Y"][-1] - hu.bp.BASE_LINE_BAND_PX
             ends = [float(m["xl"][low].min()), float(m["xr"][low].max())]
